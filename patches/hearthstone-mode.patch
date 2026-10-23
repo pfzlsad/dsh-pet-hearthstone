@@ -1,0 +1,372 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -497,10 +497,85 @@
+ * 碎碎念指令：带表情包（用户开启 whisperImageEnabled 时）——要求模型配合作画说一句。
+ * 明确「正文仍是一句话」：图是配图，不是让模型描述画面本身。
+ */
+-function userTextWithMeme(meme) {
+-	return "随便说一句日常碎碎念，一句就好，20 字以内。\n这次会配一张表情包一起显示，图的内容是：" + meme.name + "（" + meme.desc + "）。\n请让这句话和这张图的情绪/场景自然契合，像是配合画面说出来的；不要描述画面本身。";
++function userTextWithMeme(meme, hearthstone = false) {
++	const head = hearthstone ? HEARTHSTONE_USER_TEXT : "随便说一句日常碎碎念，一句就好，20 字以内。";
++	return head + "\n这次会配一张表情包一起显示，图的内容是：" + meme.name + "（" + meme.desc + "）。\n请让这句话和这张图的情绪/场景自然契合，像是配合画面说出来的；不要描述画面本身。" + (hearthstone ? "梗还是要炉石的。" : "");
++}
++/** 炉石模式（顶层 hearthstoneMode）：碎碎念的「语料」换成炉石相关梗。
++*  语料来源 = 用户提供的《炉石梗收集》，原句照抄，可整句引用也可改写成同风格的新梗。
++*  只影响**碎碎念**（周期自动 + 右键菜单手动 + pet 命令留空），对话人设不受影响。 */
++const HEARTHSTONE_LINES = [
++	"人一定要有梦想！",
++	"这还得熬多久。",
++	"喔，对的对的对的对的对的。",
++	"哦，不对，哎呀，不对不对不对。",
++	"┗|｀O′|┛ 嗷~~我他妈打错了。",
++	"哇！金色传说~",
++	"教科书般的亵渎",
++	"遮沙蔽风了吧。",
++	"叠甲，过。",
++	"炉石传说这个游戏，是没有bug的，一切以结算为准。",
++	"我草，全对！",
++	"你们看我屌吗？",
++	"黑骑砍什么不亏？",
++	"都让开！要炸了💣💣💣！",
++	"愿青龙指引你，在十点法力值的时候，钓一整天的鱼。",
++	"DJWCB",
++	"不是提了吗"
++];
++/** 炉石模式的碎碎念指令（替代 USER_TEXT）：说一句炉石味儿的一句话 */
++const HEARTHSTONE_USER_TEXT = "随便来一句炉石梗碎碎念，一句就好，20 字以内。可以是上面的原句、也可以自己造同风格的。";
++/** 炉石模式的人设正文（替代 whisperPrompt）：语言风格 + 语料一起给模型 */
++function hearthstonePersona() {
++	return "你是一只满嘴炉石梗的桌宠，主人是炉石传说老玩家。你要说一句 20 字以内的碎碎念，开口就是炉石味儿：卡牌台词、主播名场面、天梯/竞技场吐槽、酒馆战棋黑话都行，语气欠揍又好笑，像直播间弹幕。不要解释梗，不要提你是AI，不要描述画面。\n你可以整句引用下面这些梗，也可以自己造同风格的新梗：\n" + HEARTHSTONE_LINES.map((line) => "· " + line).join("\n");
++}
++/** 炉石进程名匹配（客户端进程就叫 Hearthstone.exe；Beta / 多开变体也一起算） */
++const HEARTHSTONE_PROCESS = /hearthstone/i;
++/** 自动检测轮询间隔（ms）：够快（一开游戏就切）又不至于一直扫进程 */
++const HEARTHSTONE_POLL_MS = 8e3;
++/**
++* 炉石游戏是否正在运行：Windows 用 tasklist（/FO CSV 全量列一遍再匹配进程名，
++* 比 /FI 过滤更稳——Beta 版和玩家自己改名的启动器也能命中）；macOS / Linux 用 pgrep。
++* 只读、无副作用；spawn 失败、超时、任何异常一律当「没开着」，检测本身绝不打断碎碎念。
++*/
++function detectHearthstoneProcess() {
++	return new Promise((resolveDetect) => {
++		const isWin = process.platform === "win32";
++		const command = isWin ? "tasklist" : "pgrep";
++		const args = isWin ? ["/NH", "/FO", "CSV"] : ["-i", "-f", "hearthstone"];
++		let child;
++		try {
++			child = spawn(command, args, { windowsHide: true });
++		} catch {
++			resolveDetect(false);
++			return;
++		}
++		let out = "";
++		let done = false;
++		let killTimer = null;
++		const finish = (value) => {
++			if (done) return;
++			done = true;
++			if (killTimer !== null) clearTimeout(killTimer);
++			resolveDetect(value);
++		};
++		killTimer = setTimeout(() => {
++			try {
++				child.kill();
++			} catch {}
++			finish(false);
++		}, 8e3);
++		child.stdout?.on("data", (chunk) => {
++			out += chunk;
++			// 极端情况（进程列表超大）只留尾部，够匹配就行
++			if (out.length > 4e6) out = out.slice(-1e6);
++		});
++		child.stderr?.on("data", () => {});
++		child.on("error", () => finish(false));
++		child.on("close", () => finish(HEARTHSTONE_PROCESS.test(out)));
++	});
+ }
+-async function generateWhisper(ctx, system, meme, preferred) {
++async function generateWhisper(ctx, system, meme, preferred, hearthstone = false) {
+ 	const candidates = modelCandidates(ctx, preferred);
+ 	if (candidates.length === 0) return {
+ 		ok: false,
+@@ -519,7 +594,7 @@
+ 		message: noTextReason(void 0)
+ 	};
+ 	for (const [i, sel] of candidates.entries()) {
+-		const result = await generateWith$1(ctx, llm, sel, system, meme);
++		const result = await generateWith$1(ctx, llm, sel, system, meme, hearthstone);
+ 		if (result.ok) return result;
+ 		last = result;
+ 		if (i + 1 < candidates.length) console.warn(`dsh-pet: 碎碎念用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`);
+@@ -527,7 +602,7 @@
+ 	return last;
+ }
+ /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
+-async function generateWith$1(ctx, llm, sel, system, meme) {
++async function generateWith$1(ctx, llm, sel, system, meme, hearthstone = false) {
+ 	const deadline = AbortSignal.timeout(TIMEOUT_MS$1);
+ 	const supportsOff = await supportsReasoningOff(ctx, sel.provider, sel.model);
+ 	const options = {
+@@ -537,7 +612,7 @@
+ 		messages: [createUserMessage({
+ 			content: [{
+ 				type: "text",
+-				text: meme ? userTextWithMeme(meme) : USER_TEXT
++				text: meme ? userTextWithMeme(meme, hearthstone) : hearthstone ? HEARTHSTONE_USER_TEXT : USER_TEXT
+ 			}],
+ 			source: { kind: "user" }
+ 		})],
+@@ -804,6 +879,8 @@
+ 	"whisperImageEnabled",
+ 	"chatImageEnabled",
+ 	"chatImageLimit",
++	"hearthstoneMode",
++	"hearthstoneAuto",
+ 	"chatMemoryRounds",
+ 	"whisperModel",
+ 	"chatModel",
+@@ -972,6 +1049,8 @@
+ 		case "notificationsEnabled": return typeof value === "boolean";
+ 		case "whisperImageEnabled": return typeof value === "boolean";
+ 		case "chatImageEnabled": return typeof value === "boolean";
++		case "hearthstoneMode": return typeof value === "boolean";
++		case "hearthstoneAuto": return typeof value === "boolean";
+ 		case "confineToScreen": return typeof value === "boolean";
+ 		case "animations": return animationsValid(value);
+ 		case "animationWeights": return weightsValid(value);
+@@ -1217,6 +1296,10 @@
+ 	if (wie !== void 0 && typeof wie !== "boolean") return null;
+ 	const cie = o.chatImageEnabled;
+ 	if (cie !== void 0 && typeof cie !== "boolean") return null;
++	const hs = o.hearthstoneMode;
++	if (hs !== void 0 && typeof hs !== "boolean") return null;
++	const hsa = o.hearthstoneAuto;
++	if (hsa !== void 0 && typeof hsa !== "boolean") return null;
+ 	const cts = o.confineToScreen;
+ 	if (cts !== void 0 && typeof cts !== "boolean") return null;
+ 	const ph = o.physics;
+@@ -1239,6 +1322,8 @@
+ 	if (ne !== void 0) outConfig.notificationsEnabled = ne;
+ 	if (wie !== void 0) outConfig.whisperImageEnabled = wie;
+ 	if (cie !== void 0) outConfig.chatImageEnabled = cie;
++	if (hs !== void 0) outConfig.hearthstoneMode = hs;
++	if (hsa !== void 0) outConfig.hearthstoneAuto = hsa;
+ 	if (cts !== void 0) outConfig.confineToScreen = cts;
+ 	if (ph !== void 0) outConfig.physics = ph;
+ 	if (fo !== void 0) outConfig.font = fo;
+@@ -1250,6 +1335,8 @@
+ 	if (ne !== void 0) bodyOwned.add("notificationsEnabled");
+ 	if (wie !== void 0) bodyOwned.add("whisperImageEnabled");
+ 	if (cie !== void 0) bodyOwned.add("chatImageEnabled");
++	if (hs !== void 0) bodyOwned.add("hearthstoneMode");
++	if (hsa !== void 0) bodyOwned.add("hearthstoneAuto");
+ 	if (cts !== void 0) bodyOwned.add("confineToScreen");
+ 	if (ph !== void 0) bodyOwned.add("physics");
+ 	if (fo !== void 0) bodyOwned.add("font");
+@@ -4005,6 +4092,10 @@
+ 	};
+ 	let activePetId = "";
+ 	const lastWhisperAt = new Map();
++	/** 炉石客户端此刻是否在跑（只在 hearthstoneAuto 开着时由后台轮询更新；关掉自动就归位 false）。 */
++	let hearthstoneRunning = false;
++	/** 某条目最终是否走炉石语料：自动开关开着 → 看进程；否则 → 看手动开关。 */
++	const hearthstoneOn = (conf) => conf.hearthstoneAuto === true ? hearthstoneRunning : conf.hearthstoneMode === true;
+ 	const memoryPath = join(userRoot, "memory.json");
+ 	let chatQueue = Promise.resolve();
+ 	/** 读记忆文件：不存在 → 空；损坏 → 显式报错 + 备份原始文件（绝不静默丢数据）+ 重建空记忆 */
+@@ -4052,12 +4143,38 @@
+ 		id: String(found.pet.id ?? ""),
+ 		now: new Date()
+ 	});
++	/** 炉石模式的碎碎念 system：人设正文换成炉石梗语料（顶层 hearthstoneMode 开关），
++	*  名字/时间背景仍用同一套拼装——与普通碎碎念唯一的差别就是人设正文。 */
++	const hearthstoneSystemPrompt = (found) => composeSystemPrompt({
++		prompt: hearthstonePersona(),
++		name: String(found.pet.name ?? ""),
++		id: String(found.pet.id ?? ""),
++		now: new Date()
++	});
+ 	/** 对话记忆轮数（1 轮 = 1 问 1 答）：该宠物**所属条目**的 chatMemoryRounds（合并器已填默认非负数字）。
+ 	*  同样收**已解析的条目配置**：两个调用方都已经拿到 `findPetInstance` 的结果。 */
+ 	const memoryRounds = (conf) => {
+ 		const v = Number(conf.chatMemoryRounds);
+ 		return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 5;
+ 	};
++	/**
++	* 把炉石模式的开关写回用户配置 —— 自动检测的落地点。
++	* 为什么写文件而不是只留内存：设置页的开关、右键状态、下次启动都读同一份配置，
++	* 只改内存会出现「行为已经是炉石、开关还显示关着」。写失败只告警：内存里的
++	* hearthstoneRunning 照样生效，不影响碎碎念。
++	*/
++	const persistHearthstoneMode = (on) => {
++		const file = effectiveUserFile(configPaths);
++		if (!file) return;
++		const raw = readJsonc(file);
++		if (!raw || typeof raw !== "object") return;
++		raw.hearthstoneMode = on;
++		try {
++			writeFileSync(file, JSON.stringify(raw, null, 2), "utf8");
++		} catch (e) {
++			console.warn("[dsh-pet] 炉石模式自动切换写配置失败：" + (e instanceof Error ? e.message : String(e)));
++		}
++	};
+ 	/** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
+ 	*  每只宠物独立生成（人设 = 它自己的 whisperPrompt，没写回落到所属条目）。生成成功就写进 S 的 pets.<id>.say——
+ 	*  碎碎念 / 命令气泡 / 对话回复在前端本来就是**同一条展示链路**（同一个 triggerWhisper、
+@@ -4075,9 +4192,10 @@
+ 			reason: "unknown-pet",
+ 			message: "没有这只桌宠：" + petId
+ 		};
+-		const system = petSystemPrompt(found);
++		const hs = hearthstoneOn(found.conf);
++		const system = hs ? hearthstoneSystemPrompt(found) : petSystemPrompt(found);
+ 		const meme = found.conf.whisperImageEnabled === true ? pickMeme(readMemePool(found.conf.memes, memeDirsFor(found.entry))) : void 0;
+-		const result = await generateWhisper(ctx, system, meme, configuredModel(found.conf, "whisperModel"));
++		const result = await generateWhisper(ctx, system, meme, configuredModel(found.conf, "whisperModel"), hs);
+ 		if (!result.ok) {
+ 			console.warn("[dsh-pet] 碎碎念生成失败 pet=" + petId + " reason=" + result.reason + (result.message ? " " + result.message : ""));
+ 			return result;
+@@ -5859,6 +5977,49 @@
+ 			if (timer !== null) clearTimeout(timer);
+ 		};
+ 	}, "dsh-pet: whisper poll");
++	/**
++	* 炉石自动检测：hearthstoneAuto 开着时每 8s 扫一次进程，开游戏 → 炉石模式开，
++	* 关游戏 → 炉石模式关（写回用户配置，UI 与行为一致）。
++	*
++	* 自动关掉时把 hearthstoneRunning 归位 false，但**不动**用户配置里的 hearthstoneMode——
++	* 手动开关的语义是「我自己的偏好」，不该被一次关闭自动顺带改掉。
++	* 每次 tick 都重读配置，所以设置页改完保存后下一轮就按新值跑，不需要重启插件。
++	*/
++	ctx.effect(() => {
++		let disposed$1 = false;
++		let timer = null;
++		function arm(ms) {
++			if (disposed$1) return;
++			timer = setTimeout(() => void tick(), ms);
++		}
++		async function tick() {
++			let cfg;
++			try {
++				cfg = readAllConfig(configPaths);
++			} catch {
++				arm(HEARTHSTONE_POLL_MS);
++				return;
++			}
++			if (cfg.main?.hearthstoneAuto !== true) {
++				hearthstoneRunning = false;
++				arm(HEARTHSTONE_POLL_MS);
++				return;
++			}
++			const running = await detectHearthstoneProcess();
++			if (disposed$1) return;
++			if (running !== hearthstoneRunning) {
++				hearthstoneRunning = running;
++				persistHearthstoneMode(running);
++				console.info("[dsh-pet] 检测到炉石" + (running ? "已启动 → 开启炉石模式" : "已退出 → 关闭炉石模式"));
++			}
++			arm(HEARTHSTONE_POLL_MS);
++		}
++		tick();
++		return () => {
++			disposed$1 = true;
++			if (timer !== null) clearTimeout(timer);
++		};
++	}, "dsh-pet: hearthstone auto detect");
+ 	ctx.effect(() => ctx.commands.register({
+ 		name: "pet",
+ 		description: "选择桌宠（/chat 对话的目标；支持选择框或手输 id/名字）",
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -2246,6 +2246,12 @@
+ 	notifyToggleHint: "对话完成 / 生成失败 / 权限申请 / 用户选择，在窗口失焦时弹出系统级通知（桌面右下角）。",
+ 	whisperImageToggle: "碎碎念配图",
+ 	whisperImageToggleHint: "碎碎念时从表情包池随机抽一张，连同那句话一起显示（图片映射在配置文件顶层 memes）。token：碎碎念本来就每次生成都要调一次模型，配图只是把抽中那张的名称+描述（约 100 字符 / ≈60 token）加进同一次请求，增量可忽略。",
++	hearthstoneToggle: "炉石模式",
++	hearthstoneToggleHint: "开启后碎碎念不再用「人设」，改说炉石梗：卡牌台词、主播名场面、天梯/竞技场吐槽、酒馆战棋黑话，20 字以内一句话，每次引一句原梗或造一句同风格的新梗。只影响碎碎念（周期自动、右键「碎碎念」），对话人设不变。全局开关，保存后下一次碎碎念就生效。",
++	hearthstoneAutoToggle: "随炉石自动切换",
++	hearthstoneAutoToggleHint: "开启后每 8 秒检测一次炉石客户端进程：游戏启动 → 自动开启炉石模式；游戏退出 → 自动关闭。自动开着时以进程检测为准（手动开关只在两次切换之间临时生效）。关掉自动后检测立即停止，炉石模式保留你最后一次的设置。",
++	hearthstoneTitle: "炉石模式",
++	hearthstoneHint: "把碎碎念的语料换成炉石梗（语料见 lib/index.js 的 HEARTHSTONE_LINES），支持手动开关，也可以跟着游戏进程自动切换。全局生效，保存后写进用户配置。",
+ 	chatImageToggle: "对话配图",
+ 	chatImageToggleHint: "对话时由 AI 按当前语境从表情包池挑一张配图（可不挑；图片映射在配置文件顶层 memes）。token：每条消息都要把整张清单附进请求，当前约 1.1k 字符（≈650 token，约碎碎念配图的 11 倍），并随图片数量线性增长；关掉则一个字符都不附。",
+ 	confineToggle: "锁定在当前屏幕",
+@@ -2398,6 +2404,12 @@
+ 	notifyToggleHint: "OS-level toasts (bottom-right of the desktop) for conversation completion, failures, permission requests, and questions — only while this window is unfocused.",
+ 	whisperImageToggle: "Whisper images",
+ 	whisperImageToggleHint: "Attach one random meme from the pool to each whisper line (image mapping lives in the top-level `memes` config field). Tokens: a whisper already calls the model every cycle, so the image only appends the name + description of that one meme (~100 chars / ~60 tokens) to the same request — negligible.",
++	hearthstoneToggle: "Hearthstone mode",
++	hearthstoneToggleHint: "When on, whispers stop using the persona and speak Hearthstone meme — card voice lines, streamer moments, ladder / arena complaints, Battlegrounds slang, one line under 20 characters, quoting a known line or coining a new one in the same style. Whisper only (auto cycle and the right-click \"Whisper\" action); the chat persona is unchanged. Global switch; applies to the next whisper after saving.",
++	hearthstoneAutoToggle: "Follow the game",
++	hearthstoneAutoToggleHint: "Checks for the Hearthstone client every 8 seconds: game started → Hearthstone mode turns on; game closed → it turns off. While this is on, detection wins (the manual switch only holds between transitions). Turning it off stops detection and keeps your last setting.",
++	hearthstoneTitle: "Hearthstone mode",
++	hearthstoneHint: "Swaps the whisper corpus for Hearthstone memes (corpus: HEARTHSTONE_LINES in lib/index.js). Switch it manually, or let it follow the game process. Global; saved into the user config.",
+ 	chatImageToggle: "Chat images",
+ 	chatImageToggleHint: "Let the AI pick one meme from the pool that fits the current context (optional; mapping lives in the top-level `memes` config field). Tokens: every message carries the whole catalog — currently ~1.1k chars (~650 tokens, about 11x the whisper case) and growing with the number of images; turning this off appends nothing at all.",
+ 	confineToggle: "Lock to the current screen",
+@@ -2852,6 +2864,8 @@
+ 		}, []);
+ 		const [notifyEnabled$1, setNotifyEnabled] = useState(true);
+ 		const [whisperImage, setWhisperImage] = useState(false);
++		const [hearthstone, setHearthstone] = useState(false);
++		const [hearthstoneAuto, setHearthstoneAuto] = useState(false);
+ 		const [chatImage, setChatImage] = useState(false);
+ 		const [confineScreen, setConfineScreen] = useState(false);
+ 		const [physics, setPhysics] = useState({ ...DEFAULT_PHYSICS });
+@@ -2885,6 +2899,8 @@
+ 			setSelId((id) => loadedPets.some((p) => p.id === id) ? id : loadedPets[0]?.id ?? "");
+ 			if (typeof m.notificationsEnabled === "boolean") setNotifyEnabled(m.notificationsEnabled);
+ 			if (typeof m.whisperImageEnabled === "boolean") setWhisperImage(m.whisperImageEnabled);
++			if (typeof m.hearthstoneMode === "boolean") setHearthstone(m.hearthstoneMode);
++			if (typeof m.hearthstoneAuto === "boolean") setHearthstoneAuto(m.hearthstoneAuto);
+ 			if (typeof m.chatImageEnabled === "boolean") setChatImage(m.chatImageEnabled);
+ 			if (typeof m.confineToScreen === "boolean") setConfineScreen(m.confineToScreen);
+ 			if (m.physics && typeof m.physics === "object") setPhysics({
+@@ -3049,6 +3065,8 @@
+ 					pets,
+ 					notificationsEnabled: notifyEnabled$1,
+ 					whisperImageEnabled: whisperImage,
++					hearthstoneMode: hearthstone,
++					hearthstoneAuto,
+ 					chatImageEnabled: chatImage,
+ 					confineToScreen: confineScreen,
+ 					physics,
+@@ -3377,6 +3395,16 @@
+ 						]
+ 					})]
+ 				}),
++				h("div", {
++					className: "dsh-pet-cfg__card",
++					children: [cardHead(t("hearthstoneTitle"), t("hearthstoneHint")), h("div", {
++						className: "dsh-pet-cfg__grid4",
++						children: [
++							toggleCell("hearthstoneToggle", hearthstone, busy, setHearthstone),
++							toggleCell("hearthstoneAutoToggle", hearthstoneAuto, busy, setHearthstoneAuto, true)
++						]
++					})]
++				}),
+ 				h("div", {
+ 					className: "dsh-pet-cfg__card",
+ 					children: [
+--- a/assets/config.jsonc
++++ b/assets/config.jsonc
+@@ -40,6 +40,19 @@
+   // 右键菜单「对话」与桌宠聊天时用哪个服务商 + 模型。填了但调用失败（凭据被删 / 模型下架 /
+   // 该服务商没配 key）会**自动回落到当前对话的模型重试一次**，仍失败才按生成失败报错。
+   "chatModel": { "provider": "", "model": "" },
++  // ===================== 炉石模式（全局默认，所有宠物共用；种类文件顶层可覆盖） =====================
++  // 开启后，碎碎念**不再用上面的人设**，改成「满嘴炉石梗」：语料来自《炉石梗收集》
++  // （卡牌台词 / 主播名场面 / 天梯吐槽 / 酒馆战棋黑话），每次引一句原梗或造一句同风格的新梗。
++  // 只影响碎碎念（周期自动、右键「碎碎念」、命令留空）；对话人设不变。
++  // 必填布尔值；缺失即配置错误。设置页「全局开关」里有同名开关，随「保存」写进用户配置，下一次碎碎念即生效。
++  "hearthstoneMode": false,
++  // ===================== 炉石模式：随游戏自动切换（全局默认，所有宠物共用；种类文件顶层可覆盖） =====================
++  // 开启后每 8 秒检测一次炉石客户端进程（Windows tasklist / macOS·Linux pgrep，命中名含 Hearthstone）：
++  //   游戏启动 → 自动把 hearthstoneMode 置 true（写回用户配置）；游戏退出 → 自动置 false。
++  // 自动模式开着时，以进程检测结果为准，手动开关只在两次检测切换之间临时生效。
++  // 关掉自动后进程检测立即停止，hearthstoneMode 保持用户最后一次的值，不会被顺带改掉。
++  // 必填布尔值；缺失即配置错误。设置页「炉石模式」卡里有同名开关。
++  "hearthstoneAuto": false,
+   // ===================== 表情包：碎碎念配图开关（全局默认，所有宠物共用；种类文件顶层可覆盖） =====================
+   // 开启后，碎碎念每次生成时从 memes 图片池随机抽 1 张，连同那句话一起显示（气泡配图）。
+   // 碎碎念本身是"随口一句"，没有上下文可选，所以按随机抽（与对话的 AI 选图策略不同）。
