@@ -20,6 +20,11 @@ Copy-Item (Join-Path $root "plugin\lib\index.js")  (Join-Path $target "lib\index
 Copy-Item (Join-Path $root "plugin\lib\client.js") (Join-Path $target "lib\client.js") -Force
 Write-Host "已覆盖 lib/index.js, lib/client.js"
 
+$hotkeyDir = Join-Path $target "runtime\coach-hotkey"
+New-Item -ItemType Directory -Force -Path $hotkeyDir | Out-Null
+Copy-Item (Join-Path $root "plugin\runtime\coach-hotkey\main.cjs") (Join-Path $hotkeyDir "main.cjs") -Force
+Write-Host "已覆盖 runtime/coach-hotkey/main.cjs（教练快捷键小助手）"
+
 if (-not $SkipConfig) {
     Copy-Item (Join-Path $root "plugin\assets\config.jsonc") (Join-Path $target "assets\config.jsonc") -Force
     Write-Host "已覆盖 assets/config.jsonc（内置默认值；用户配置 main-config.jsonc 不受影响）"
@@ -29,3 +34,6 @@ Write-Host ""
 Write-Host "装好了。重启 DSH 后生效；配置项在 $env:USERPROFILE\.dsh\dsh-pet\main-config.jsonc："
 Write-Host "  hearthstoneMode = true/false   手动开关"
 Write-Host "  hearthstoneAuto = true/false   随炉石游戏进程自动切换"
+Write-Host "  hsCoachEnabled  = true/false   出牌教练开关"
+Write-Host "  hsCoachHotkey   = Ctrl+Alt+H   教练全局快捷键"
+Write-Host "  hsLogPath       = ''           自定义 Power.log 路径（留空自动探测）"

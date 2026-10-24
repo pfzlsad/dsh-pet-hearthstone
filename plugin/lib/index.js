@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, fstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, normalize, resolve, sep } from "node:path";
@@ -575,6 +575,611 @@ function detectHearthstoneProcess() {
 		child.on("close", () => finish(HEARTHSTONE_PROCESS.test(out)));
 	});
 }
+//#region src/host/hearthstone/coach.ts
+/**
+ * 炉石教练核心（纯函数，无 IO）：
+ *   - parsePowerLog(text, state?)：增量解析 Power.log，维护对局状态
+ *   - buildSnapshot(state, cardDb)：把当前状态整理成给模型看的结构化对象
+ *   - formatState(snap)：把快照压成一段紧凑中文，直接塞进 prompt
+ *   - createCardDb(entries)：卡牌库查询器
+ * 只在 dsh-pet 宿主里用；所有函数可独立测试。
+ */
+
+const HS_TAGS = new Set([
+  "ZONE", "CONTROLLER", "CARDTYPE", "COST", "ATK", "HEALTH", "DAMAGE", "ARMOR",
+  "RESOURCES", "RESOURCES_USED", "TEMP_RESOURCES", "OVERLOAD_LOCKED", "OVERLOAD_OWED",
+  "TURN", "CURRENT_PLAYER", "STEP", "PLAYSTATE", "STATE", "HERO_ENTITY", "PLAYER_ID",
+  "ZONE_POSITION", "EXHAUSTED", "TAUNT", "DIVINE_SHIELD", "STEALTH", "FROZEN",
+  "WINDFURY", "POISONOUS", "LIFESTEAL", "REBORN", "DURABILITY", "WEAPON",
+  "NUM_CARDS_DRAWN_THIS_TURN", "NUM_ATTACKS_THIS_TURN", "MULLIGAN_STATE"
+]);
+
+function createGameState() {
+  return {
+    entities: new Map(),
+    gameEntityId: 0,
+    players: { 1: { id: 0, playerId: 1 }, 2: { id: 0, playerId: 2 } },
+    playerNames: new Map(),
+    turn: 0,
+    currentPlayer: 0,
+    step: "",
+    gameOver: false,
+    localController: 0,
+    revealScore: { 1: 0, 2: 0 },
+    revealedHand: new Set(),
+    unknownPids: new Set(),
+    plays: [],
+    started: false,
+    seenPlays: new Set()
+  };
+}
+
+function resetForNewGame(st) {
+  st.entities = new Map();
+  st.gameEntityId = 0;
+  st.players = { 1: { id: 0, playerId: 1 }, 2: { id: 0, playerId: 2 } };
+  st.turn = 0;
+  st.currentPlayer = 0;
+  st.step = "";
+  st.gameOver = false;
+  st.localController = 0;
+  st.revealScore = { 1: 0, 2: 0 };
+  st.revealedHand = new Set();
+  st.unknownPids = new Set();
+  st.playerNames = new Map();
+  st.plays = [];
+  st.started = true;
+  st.seenPlays = new Set();
+}
+
+/** 把 Entity 引用解析成实体 id：
+ *  - 纯数字：直接就是 id
+ *  - `GameEntity`：游戏实体
+ *  - `玩家名#1234`：查 DebugPrintGame 建的 名字→PlayerID 表，再找玩家实体
+ *  - `[... id=12 ...]`：括号里的 id
+ */
+function resolveEntityId(st, ref) {
+  const raw = String(ref).trim();
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (raw === "GameEntity") return st.gameEntityId || 1;
+  const bracket = /(?:^|\s)id=(\d+)/.exec(raw);
+  if (bracket) return Number(bracket[1]);
+  const playerId = st.playerNames.get(raw);
+  if (playerId) return st.players[playerId]?.id || 0;
+  // 有些对局会给对手打码成 UNKNOWN HUMAN PLAYER，但 TAG_CHANGE 里用的是「名字#数字」：
+  // 只有一个玩家名字未知时，就认定这个战网名属于他，并记住映射。
+  if (raw.includes("#") && st.unknownPids && st.unknownPids.size === 1) {
+    const pid = [...st.unknownPids][0];
+    st.playerNames.set(raw, pid);
+    return st.players[pid]?.id || 0;
+  }
+  return 0;
+}
+
+function ensureEntity(st, id) {
+  let e = st.entities.get(id);
+  if (!e) {
+    e = { id, cardId: "", name: "", controller: 0, zone: "", cardType: "", tags: {}, position: 0 };
+    st.entities.set(id, e);
+  }
+  return e;
+}
+
+/** 从 `Entity=71` / `[entityName=火球术 id=71 zone=HAND ...]` 里抽 id / cardId / player / name */
+function parseRef(ref) {
+  const out = { id: 0, cardId: "", player: 0, name: "", zone: "", zonePos: 0 };
+  const idM = /(?:^|\s)id=(\d+)/.exec(ref);
+  if (idM) out.id = Number(idM[1]);
+  else if (/^\d+$/.test(ref.trim())) out.id = Number(ref.trim());
+  const cardM = /(?:^|\s)(?:cardId|CardID)=([A-Za-z0-9_]+)/.exec(ref);
+  if (cardM) out.cardId = cardM[1];
+  const playerM = /(?:^|\s)player=(\d+)/.exec(ref);
+  if (playerM) out.player = Number(playerM[1]);
+  const nameM = /entityName=([^\]]+?) id=/.exec(ref);
+  if (nameM) out.name = nameM[1];
+  const zoneM = /(?:^|\s)zone=(\S+)/.exec(ref);
+  if (zoneM) out.zone = zoneM[1];
+  const posM = /(?:^|\s)zonePos=(\d+)/.exec(ref);
+  if (posM) out.zonePos = Number(posM[1]);
+  return out;
+}
+
+function noteReveal(st, ent) {
+  if (!ent || ent.zone !== "HAND" || !ent.cardId) return;
+  if (ent.controller !== 1 && ent.controller !== 2) return;
+  if (st.revealedHand.has(ent.id)) return;
+  st.revealedHand.add(ent.id);
+  st.revealScore[ent.controller] += 1;
+}
+
+function applyTag(st, ent, name, raw) {
+  const num = /^-?\d+$/.test(raw) ? Number(raw) : NaN;
+  ent.tags[name] = Number.isNaN(num) ? raw : num;
+  if (name === "ZONE") ent.zone = raw;
+  else if (name === "CONTROLLER") ent.controller = Number(raw);
+  else if (name === "CARDTYPE") ent.cardType = raw;
+  else if (name === "ZONE_POSITION") ent.position = Number(raw);
+  else if (name === "TURN") {
+    if (st.gameEntityId && ent.id === st.gameEntityId) st.turn = Number(raw);
+  }
+  else if (name === "STEP") st.step = raw;
+  else if (name === "PLAYSTATE" && (raw === "WON" || raw === "LOST" || raw === "TIED")) st.gameOver = true;
+  else if (name === "STATE" && raw === "COMPLETE") st.gameOver = true;
+  else if (name === "CURRENT_PLAYER" && Number(raw) === 1) {
+    // 该实体是玩家实体：从 players 反查 PlayerID
+    for (const key of [1, 2]) if (st.players[key].id === ent.id) st.currentPlayer = key;
+  }
+  noteReveal(st, ent);
+}
+
+const LINE_RE = /^(?:D\s+[\d:.]+\s+)?(GameState|PowerTaskList)\.DebugPrintPower\(\)\s*-\s?(.*)$/;
+const GAME_INFO_RE = /^(?:D\s+[\d:.]+\s+)?(?:GameState|PowerTaskList)\.DebugPrintGame\(\)\s*-\s*PlayerID=(\d+),\s*PlayerName=(.+?)\s*$/;
+const TAGLINE_RE = /^tag=([A-Z_0-9]+)\s+value=(.*)$/;
+
+/** 统一 Entity 引用写法：`Entity=71` → `71`；`[entityName=.. id=71 ..]` 原样；`rikki#1` 原样 */
+function refText(raw) {
+  const s = String(raw).trim();
+  if (s.startsWith("[")) return s;
+  return s.replace(/^Entity=/, "");
+}
+
+/**
+ * 解析一段 Power.log 文本。
+ * 只认 GameState.DebugPrintPower()（PowerTaskList 是同一批事件的重放，重复处理会算两遍）。
+ */
+function parsePowerLog(text, st) {
+  const state = st ?? createGameState();
+  let ctx = null; // 当前块作用的实体
+  const lines = String(text).split(/\r?\n/);
+  for (const line of lines) {
+    const gm = GAME_INFO_RE.exec(line);
+    if (gm) {
+      const pid = Number(gm[1]);
+      const nm = gm[2].trim();
+      state.playerNames.set(nm, pid);
+      if (/^UNKNOWN/i.test(nm)) state.unknownPids.add(pid);
+      continue;
+    }
+    const m = LINE_RE.exec(line);
+    if (!m) continue;
+    if (m[1] !== "GameState") continue;
+    const payload = m[2].trim();
+    if (!payload) continue;
+
+    if (payload === "CREATE_GAME") {
+      resetForNewGame(state);
+      ctx = null;
+      continue;
+    }
+    // 顶格事件：GameEntity / Player
+    let mm = /^GameEntity EntityID=(\d+)/.exec(payload);
+    if (mm) {
+      state.gameEntityId = Number(mm[1]);
+      ctx = ensureEntity(state, state.gameEntityId);
+      continue;
+    }
+    mm = /^Player EntityID=(\d+) PlayerID=(\d+)/.exec(payload);
+    if (mm) {
+      const id = Number(mm[1]);
+      const playerId = Number(mm[2]);
+      const ent = ensureEntity(state, id);
+      state.players[playerId].id = id;
+      ent.playerId = playerId;
+      ctx = ent;
+      continue;
+    }
+    mm = /^FULL_ENTITY - Creating ID=(\d+) CardID=(\S*)/.exec(payload);
+    if (mm) {
+      const ent = ensureEntity(state, Number(mm[1]));
+      if (mm[2]) ent.cardId = mm[2];
+      ctx = ent;
+      continue;
+    }
+    mm = /^FULL_ENTITY - Updating (\[.*?\]|Entity=\d+) CardID=(\S*)/.exec(payload);
+    if (mm) {
+      const ref = parseRef(mm[1]);
+      const ent = ensureEntity(state, ref.id);
+      if (mm[2]) ent.cardId = mm[2];
+      if (ref.cardId && !ent.cardId) ent.cardId = ref.cardId;
+      if (ref.player) ent.controller = ref.player;
+      if (ref.name) ent.name = ref.name;
+      if (ref.zone) ent.zone = ref.zone;
+      ctx = ent;
+      continue;
+    }
+    mm = /^SHOW_ENTITY - Updating (\[.*?\]|Entity=\d+) CardID=(\S*)/.exec(payload);
+    if (mm) {
+      const ref = parseRef(mm[1]);
+      const ent = ensureEntity(state, ref.id);
+      if (mm[2]) ent.cardId = mm[2];
+      if (ref.player) ent.controller = ref.player;
+      if (ref.zone) ent.zone = ref.zone;
+      if (ref.name) ent.name = ref.name;
+      ctx = ent;
+      continue;
+    }
+    mm = /^CHANGE_ENTITY - Updating (\[.*?\]|Entity=\d+) CardID=(\S*)/.exec(payload);
+    if (mm) {
+      const ref = parseRef(mm[1]);
+      const ent = ensureEntity(state, ref.id);
+      if (mm[2]) ent.cardId = mm[2];
+      if (ref.player) ent.controller = ref.player;
+      ctx = ent;
+      continue;
+    }
+    mm = /^TAG_CHANGE (.+?) tag=([A-Z_0-9]+) value=(.*)$/.exec(payload);
+    if (mm) {
+      const ref = refText(mm[1]);
+      const id = resolveEntityId(state, ref);
+      if (!id) continue;
+      const info = parseRef(ref);
+      const ent = ensureEntity(state, id);
+      if (info.cardId) ent.cardId = info.cardId;
+      if (info.player) ent.controller = info.player;
+      if (info.name) ent.name = info.name;
+      if (info.zone) ent.zone = info.zone;
+      applyTag(state, ent, mm[2], mm[3].trim());
+      continue;
+    }
+    mm = TAGLINE_RE.exec(payload);
+    if (mm && ctx) {
+      applyTag(state, ctx, mm[1], mm[2].trim());
+      continue;
+    }
+    // 记录动作（用于「最近发生了什么」）
+    mm = /^BLOCK_START BlockType=([A-Z_]+) Entity=(.+?)(?: EffectCardId=| EffectIndex=| Target=| SubOption=| TriggerKeyword=|$)/.exec(payload);
+    if (mm) {
+      const type = mm[1];
+      if (type === "PLAY" || type === "ATTACK") {
+        const targetM = / Target=(\d+)/.exec(payload);
+        const ref = parseRef(refText(mm[2]));
+        if (targetM) mm[3] = targetM[1];
+        if (!ref.id) ref.id = resolveEntityId(state, refText(mm[2]));
+        const ent = ref.id ? ensureEntity(state, ref.id) : null;
+        const cardId = ref.cardId || ent?.cardId || "";
+        const controller = ref.player || ent?.controller || 0;
+        const target = Number(mm[3] ?? 0) || 0;
+        const last = state.plays[state.plays.length - 1];
+        const same = last && last.type === type && last.id === ref.id && last.target === target && last.cardId === cardId && last.turn === state.turn;
+        if (!same && cardId && ref.id) {
+          state.plays.push({ turn: state.turn, type, id: ref.id, controller, cardId, target });
+          if (state.plays.length > 40) state.plays.shift();
+        }
+      }
+      continue;
+    }
+  }
+  state.localController = detectLocalPlayer(state);
+  return state;
+}
+
+/** 本地玩家 = 手牌里能看到真实 cardId 的那一方（对手手牌在日志里没有 cardId）。
+ *  偶尔有「看对手手牌」的揭示，用多数投票，不用单张。 */
+function detectLocalPlayer(st) {
+  // 优先用「整局里手牌被揭示过多少次」：本地玩家的手牌一直可见，对手只有极少数被效果翻开
+  const { 1: a, 2: b } = st.revealScore;
+  if (a > 0 || b > 0) return a >= b ? 1 : 2;
+  const counts = { 1: 0, 2: 0 };
+  for (const e of st.entities.values()) {
+    if (e.zone === "HAND" && e.cardId && (e.controller === 1 || e.controller === 2)) counts[e.controller] += 1;
+  }
+  if (counts[1] === 0 && counts[2] === 0) return st.localController || 1;
+  return counts[1] >= counts[2] ? 1 : 2;
+}
+
+function effectiveHealth(ent) {
+  const h = ent.tags.HEALTH;
+  if (typeof h !== "number") return null;
+  const d = typeof ent.tags.DAMAGE === "number" ? ent.tags.DAMAGE : 0;
+  return h - d;
+}
+
+function hasTag(ent, name) {
+  return ent.tags[name] === 1 || ent.tags[name] === "1";
+}
+
+function minionView(ent, lookup) {
+  const info = lookup(ent.cardId);
+  return {
+    id: ent.id,
+    name: info.name || ent.name || ent.cardId || "未知随从",
+    atk: typeof ent.tags.ATK === "number" ? ent.tags.ATK : 0,
+    health: effectiveHealth(ent) ?? 1,
+    maxHealth: ent.tags.HEALTH ?? 1,
+    taunt: hasTag(ent, "TAUNT"),
+    divineShield: hasTag(ent, "DIVINE_SHIELD"),
+    stealth: hasTag(ent, "STEALTH"),
+    frozen: hasTag(ent, "FROZEN"),
+    windfury: hasTag(ent, "WINDFURY"),
+    poisonous: hasTag(ent, "POISONOUS"),
+    lifesteal: hasTag(ent, "LIFESTEAL"),
+    canAttack: !hasTag(ent, "EXHAUSTED") && (ent.tags.ATK ?? 0) > 0
+  };
+}
+
+/**
+ * 组装当前可见场面。cardDb 传 lookup(cardId) -> {name, cost, text, type, class}
+ */
+function buildSnapshot(st, lookup) {
+  const me = st.localController || 1;
+  const foe = me === 1 ? 2 : 1;
+  const mk = (playerId) => {
+    const p = st.players[playerId];
+    const hero = p.id ? st.entities.get(p.id)?.heroEntity ? st.entities.get(st.entities.get(p.id).heroEntity) : null : null;
+    const heroEnt = hero ?? (p.id ? st.entities.get(p.id) : null);
+    const hand = [];
+    const board = [];
+    const secrets = [];
+    let deckCount = 0;
+    let weapon = null;
+    for (const e of st.entities.values()) {
+      if (e.controller !== playerId || !e.zone) continue;
+      if (e.zone === "HAND") hand.push(e);
+      else if (e.zone === "PLAY" && e.cardType === "MINION") board.push(e);
+      else if (e.zone === "PLAY" && e.cardType === "WEAPON") weapon = e;
+      else if (e.zone === "SECRET") secrets.push(e);
+      else if (e.zone === "DECK") deckCount += 1;
+    }
+    const heroId = p.id ? st.entities.get(p.id)?.tags?.HERO_ENTITY : 0;
+    const realHero = heroId ? st.entities.get(Number(heroId)) : null;
+    const heroInfo = realHero ? lookup(realHero.cardId) : { name: "" };
+    hand.sort((a, b) => (a.position || 0) - (b.position || 0));
+    return {
+      playerId,
+      hero: {
+        cardId: realHero?.cardId ?? "",
+        name: realHero?.name || heroInfo.name || "未知英雄",
+        class: heroInfo.class || "",
+        health: realHero ? effectiveHealth(realHero) : null,
+        armor: realHero?.tags?.ARMOR ?? 0,
+        atk: realHero?.tags?.ATK ?? 0
+      },
+      mana: {
+        max: Number(st.entities.get(p.id)?.tags?.RESOURCES ?? realHero?.tags?.RESOURCES ?? 0),
+        used: Number(st.entities.get(p.id)?.tags?.RESOURCES_USED ?? 0),
+        temp: Number(st.entities.get(p.id)?.tags?.TEMP_RESOURCES ?? 0),
+        overloadLocked: Number(st.entities.get(p.id)?.tags?.OVERLOAD_LOCKED ?? 0)
+      },
+      hand: hand.map((e) => {
+        const info = lookup(e.cardId);
+        return {
+          cardId: e.cardId,
+          name: info.name || e.name || "未知手牌",
+          cost: typeof e.tags.COST === "number" ? e.tags.COST : (info.cost ?? 0),
+          text: info.text || ""
+        };
+      }),
+      board: board.map((e) => minionView(e, lookup)),
+      secrets: secrets.length,
+      deckCount,
+      weapon: weapon ? {
+        name: lookup(weapon.cardId).name || "武器",
+        atk: weapon.tags.ATK ?? 0,
+        durability: weapon.tags.DURABILITY ?? 0
+      } : null
+    };
+  };
+  const mine = mk(me);
+  const theirs = mk(foe);
+  const recent = st.plays.slice(-6).map((p) => {
+    const info = lookup(p.cardId);
+    const who = p.controller === me ? "我方" : "对手";
+    if (p.type === "ATTACK") return `T${p.turn} ${who}用 ${info.name || p.cardId} 攻击`;
+    const target = p.target ? lookupTarget(st, p.target, lookup) : "";
+    return `T${p.turn} ${who}打出 ${info.name || p.cardId}${target ? " → " + target : ""}`;
+  });
+  return {
+    turn: st.turn,
+    step: st.step,
+    gameOver: st.gameOver,
+    myTurn: st.currentPlayer === me,
+    me: mine,
+    foe: theirs,
+    recent
+  };
+}
+
+function lookupTarget(st, id, lookup) {
+  const e = st.entities.get(Number(id));
+  if (!e) return "";
+  if (e.cardType === "HERO") {
+    const info = lookup(e.cardId);
+    return (info.name || "英雄") + "（英雄）";
+  }
+  return lookup(e.cardId).name || e.name || "";
+}
+
+/** 把手牌/场面压成一段中文，给模型看 */
+function formatState(snap) {
+  if (!snap) return "";
+  const m = snap.me;
+  const f = snap.foe;
+  const lines = [];
+  lines.push(`回合 ${snap.turn}，${snap.myTurn ? "轮到我方" : "当前是对手回合"}。`);
+  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}法力 ${m.mana.max - m.mana.used}/${m.mana.max}${m.mana.overloadLocked ? " 过载锁定" + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
+  lines.push(`我方手牌 ${m.hand.length} 张：` + (m.hand.map((c) => `${c.name}(${c.cost}费)${c.text ? "[" + c.text.slice(0, 40) + "]" : ""}`).join("；") || "无"));
+  const playable = m.hand.filter((c) => c.cost <= m.mana.max - m.mana.used);
+  lines.push(`本回合可用手牌（只能从这里面选）：` + (playable.map((c) => `${c.name}(${c.cost}费)`).join("；") || "一张都打不出"));
+  lines.push(`我方场面 ${m.board.length} 个：` + (m.board.map(fmtMinion).join("；") || "空") + (m.weapon ? `；武器 ${m.weapon.name} ${m.weapon.atk}/${m.weapon.durability}` : ""));
+  lines.push(`对手 ${f.hero.class || ""}英雄 ${f.hero.name}：${f.hero.health ?? "?"}血 ${f.hero.armor ? f.hero.armor + "甲 " : ""}手牌 ${f.hand.length} 张 牌库 ${f.deckCount}。`);
+  lines.push(`对手场面 ${f.board.length} 个：` + (f.board.map(fmtMinion).join("；") || "空") + (f.secrets ? `；奥秘 ${f.secrets} 个` : ""));
+  if (snap.recent.length) lines.push("最近动作：" + snap.recent.join("；"));
+  return lines.join("\n");
+}
+
+function fmtMinion(x) {
+  const action = x.frozen ? "冻结·不能攻击" : x.canAttack ? "可攻击" : "已行动/无攻击力";
+  return `${x.name} ${x.atk}/${x.health}` + (x.taunt ? " 嘲讽" : "") + (x.divineShield ? " 圣盾" : "") + (x.stealth ? " 潜行" : "") + (x.windfury ? " 风怒" : "") + "（" + action + "）";
+}
+
+/** 卡牌库查询器：entries 为 Map<cardId, {name, cost, text, class, type}> */
+function createCardDb(entries) {
+  const empty = { name: "", cost: 0, text: "", class: "", type: "" };
+  return (cardId) => entries.get(cardId) || empty;
+}
+
+/** 解析 HDT 的 CardDefs XML（只抽教练用得到的字段），返回 Map */
+function parseCardDefs(xmlText) {
+  const out = new Map();
+  const reader = String(xmlText);
+  const entRe = /<Entity CardID="([^"]+)"[\s\S]*?<\/Entity>/g;
+  let m;
+  while ((m = entRe.exec(reader)) !== null) {
+    const cardId = m[1];
+    const block = m[0];
+    const nameM = /<Tag[^>]*name="CARDNAME"[^>]*>[\s\S]*?<zhCN>([\s\S]*?)<\/zhCN>/.exec(block);
+    const textM = /<Tag[^>]*name="CARDTEXT"[^>]*>[\s\S]*?<zhCN>([\s\S]*?)<\/zhCN>/.exec(block);
+    const costM = /name="COST"[^>]*value="(-?\d+)"/.exec(block);
+    const classM = /name="CLASS"[^>]*value="(-?\d+)"/.exec(block);
+    if (!nameM) continue;
+    out.set(cardId, {
+      name: decodeXml(nameM[1]),
+      cost: costM ? Number(costM[1]) : 0,
+      text: cleanCardText(textM ? decodeXml(textM[1]) : ""),
+      class: classM ? HS_CLASS[Number(classM[1])] || "" : "",
+      type: ""
+    });
+  }
+  return out;
+}
+
+/** 卡面文字去掉 <b>/<i> 之类的标签和 $ 占位符，压成一行 */
+function cleanCardText(s) {
+  return s.replace(/<[^>]+>/g, "").replace(/\$/g, "").replace(/@/g, "").replace(/\s+/g, " ").trim();
+}
+
+function decodeXml(s) {
+  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&amp;/g, "&").trim();
+}
+
+// 卡牌库里的 CLASS 枚举（以 HDT CardDefs 实际值为准，别用旧版 1~9 的顺序）
+const HS_CLASS = {
+  1: "死亡骑士", 2: "德鲁伊", 3: "猎人", 4: "法师", 5: "圣骑士", 6: "牧师",
+  7: "潜行者", 8: "萨满", 9: "术士", 10: "战士", 11: "中立", 14: "恶魔猎手"
+};
+
+/** ===== 宿主侧：日志定位 / 卡牌库缓存 / 提示词 ===== */
+
+const HS_COACH_DEFAULT_HOTKEY = "Ctrl+Alt+H";
+const HS_COACH_LOG_TAIL_BYTES = 8 * 1024 * 1024;
+
+/** 可能存放 Power.log 的根目录（按顺序探测；同一个游戏进程会往带时间戳的子目录里写） */
+function hsLogRoots(override) {
+  const roots = [];
+  if (override) roots.push(String(override));
+  roots.push("D:\\Battle.net\\Hearthstone\\Logs");
+  if (process.env.LOCALAPPDATA) roots.push(join(process.env.LOCALAPPDATA, "Blizzard", "Hearthstone", "Logs"));
+  roots.push(join(homedir(), "Saved Games", "Hearthstone", "Logs"));
+  roots.push(join(homedir(), "Saved Games", "Hearthstone"));
+  return [...new Set(roots.filter(Boolean))];
+}
+
+/** 找最新的 Power.log（根目录本身、以及每个时间戳子目录里的都算），返回 {path, mtime, size} */
+function findLatestPowerLog(override) {
+  let best = null;
+  const consider = (file) => {
+    try {
+      const s = statSync(file);
+      if (!s.isFile()) return;
+      if (!best || s.mtimeMs > best.mtime) best = { path: file, mtime: s.mtimeMs, size: s.size };
+    } catch {}
+  };
+  if (override) {
+    try {
+      const s = statSync(String(override));
+      if (s.isFile()) return {
+        path: String(override),
+        mtime: s.mtimeMs,
+        size: s.size
+      };
+    } catch {}
+  }
+  for (const root of hsLogRoots(override)) {
+    consider(join(root, "Power.log"));
+    let entries = [];
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) if (ent.isDirectory()) consider(join(root, ent.name, "Power.log"));
+  }
+  return best;
+}
+
+/** 只读文件尾部 maxBytes 字节（一局日志通常 < 5MB，避免每次全局读几十 MB） */
+function readFileTail(file, maxBytes) {
+  const fd = openSync(file, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - maxBytes);
+    const len = size - start;
+    const buf = Buffer.allocUnsafe(len);
+    let off = 0;
+    while (off < len) {
+      const n = readSync(fd, buf, off, len - off, start + off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return buf.subarray(0, off).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** 从日志尾部文本里截出「最后一局」：以最后一次 GameState 的 CREATE_GAME 为界 */
+function extractLatestGame(text) {
+  const marker = "GameState.DebugPrintPower() - CREATE_GAME";
+  const idx = String(text).lastIndexOf(marker);
+  return idx >= 0 ? text.slice(idx) : text;
+}
+
+/** 卡牌库（HDT 的 CardDefs.base.xml）→ 带磁盘缓存的查询器 */
+function loadHsCardDb(userRoot) {
+  const cachePath = join(userRoot, "hs-carddb.json");
+  const xmlPath = process.env.APPDATA ? join(process.env.APPDATA, "HearthstoneDeckTracker", "CardDefs", "CardDefs.base.xml") : "";
+  let xmlMtime = 0;
+  try {
+    xmlMtime = statSync(xmlPath).mtimeMs;
+  } catch {}
+  try {
+    const cache = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (cache && cache.srcMtime === xmlMtime && cache.cards) return createCardDb(new Map(Object.entries(cache.cards)));
+  } catch {}
+  if (!xmlPath) return createCardDb(new Map());
+  try {
+    const map = parseCardDefs(readFileSync(xmlPath, "utf8"));
+    try {
+      mkdirSync(dirname(cachePath), { recursive: true });
+      writeFileSync(cachePath, JSON.stringify({ srcMtime: xmlMtime, cards: Object.fromEntries(map) }), "utf8");
+    } catch {}
+    return createCardDb(map);
+  } catch {
+    return createCardDb(new Map());
+  }
+}
+
+/** 教练 system：一句话，只给操作；可用手牌清单是唯一合法牌池 */
+function coachSystemPrompt() {
+  return "你是《炉石传说》的出牌教练，负责在构筑对局里给主人一句最关键的出牌建议。\n" +
+    "规则：\n" +
+    "1. 只输出一句中文建议，不超过 30 个字，直接说操作和目标（带上卡名/随从名）。\n" +
+    "2. 只能使用「本回合可用手牌」清单里列出的牌。没列出来的牌一律不许提，不要凭记忆补牌。\n" +
+    "3. 场上随从可以攻击；能斩杀就先写斩杀，不能斩杀就给本回合性价比最高的一手。\n" +
+    "4. 不要解释理由、不要加引号或前缀、不要分段。";
+}
+
+/** 把模型输出压成干净的一行 */
+function cleanCoachAdvice(text) {
+  return String(text || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/^[\s"'“”「」`*#>]+|[\s"'“”「」`*#]+$/g, "")
+    .split(/\r?\n/)[0]
+    .trim()
+    .slice(0, 60);
+}
+
+//#endregion
 async function generateWhisper(ctx, system, meme, preferred, hearthstone = false) {
 	const candidates = modelCandidates(ctx, preferred);
 	if (candidates.length === 0) return {
@@ -602,8 +1207,8 @@ async function generateWhisper(ctx, system, meme, preferred, hearthstone = false
 	return last;
 }
 /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
-async function generateWith$1(ctx, llm, sel, system, meme, hearthstone = false) {
-	const deadline = AbortSignal.timeout(TIMEOUT_MS$1);
+async function generateWith$1(ctx, llm, sel, system, meme, hearthstone = false, userTextOverride = "", timeoutMs = TIMEOUT_MS$1, temperature = 1) {
+	const deadline = AbortSignal.timeout(timeoutMs);
 	const supportsOff = await supportsReasoningOff(ctx, sel.provider, sel.model);
 	const options = {
 		provider: sel.provider,
@@ -612,12 +1217,12 @@ async function generateWith$1(ctx, llm, sel, system, meme, hearthstone = false) 
 		messages: [createUserMessage({
 			content: [{
 				type: "text",
-				text: meme ? userTextWithMeme(meme, hearthstone) : hearthstone ? HEARTHSTONE_USER_TEXT : USER_TEXT
+				text: userTextOverride || (meme ? userTextWithMeme(meme, hearthstone) : hearthstone ? HEARTHSTONE_USER_TEXT : USER_TEXT)
 			}],
 			source: { kind: "user" }
 		})],
 		system,
-		temperature: 1,
+		temperature,
 		...supportsOff ? { reasoningEffort: ReasoningEffortId("off") } : {},
 		signal: deadline
 	};
@@ -648,6 +1253,35 @@ async function generateWith$1(ctx, llm, sel, system, meme, hearthstone = false) 
 }
 
 //#endregion
+
+/** 教练的一次生成：给 system + 现成 userText，沿用碎碎念的候选模型链 */
+async function generateCoachText(ctx, system, userText, preferred) {
+	const candidates = modelCandidates(ctx, preferred);
+	if (candidates.length === 0) return {
+		ok: false,
+		reason: "provider-missing",
+		message: "当前对话未配置模型"
+	};
+	const llm = ctx.llm;
+	if (!llm || typeof llm.stream !== "function") return {
+		ok: false,
+		reason: "generate-error",
+		message: "LLM 服务不可用"
+	};
+	let last = {
+		ok: false,
+		reason: "generate-error",
+		message: noTextReason(void 0)
+	};
+	for (const [i, sel] of candidates.entries()) {
+		const result = await generateWith$1(ctx, llm, sel, system, void 0, false, userText, 25e3, 0.3);
+		if (result.ok) return result;
+		last = result;
+		if (i + 1 < candidates.length) console.warn(`dsh-pet: 教练用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`);
+	}
+	return last;
+}
+
 //#region src/host/whisper-policy.ts
 function automaticWhisperSchedule(policy, petEnabled, configuredPeriodSec) {
 	if (!policy) return {
@@ -881,6 +1515,9 @@ const GLOBAL_DEFAULT_KEYS = [
 	"chatImageLimit",
 	"hearthstoneMode",
 	"hearthstoneAuto",
+	"hsCoachEnabled",
+	"hsCoachHotkey",
+	"hsLogPath",
 	"chatMemoryRounds",
 	"whisperModel",
 	"chatModel",
@@ -1051,6 +1688,9 @@ function topFieldValid(key, value) {
 		case "chatImageEnabled": return typeof value === "boolean";
 		case "hearthstoneMode": return typeof value === "boolean";
 		case "hearthstoneAuto": return typeof value === "boolean";
+		case "hsCoachEnabled": return typeof value === "boolean";
+		case "hsCoachHotkey": return typeof value === "string" && value.trim().length > 0 && value.length <= 40;
+		case "hsLogPath": return typeof value === "string";
 		case "confineToScreen": return typeof value === "boolean";
 		case "animations": return animationsValid(value);
 		case "animationWeights": return weightsValid(value);
@@ -1300,6 +1940,12 @@ function saveUserConfig(raw, existing) {
 	if (hs !== void 0 && typeof hs !== "boolean") return null;
 	const hsa = o.hearthstoneAuto;
 	if (hsa !== void 0 && typeof hsa !== "boolean") return null;
+	const hce = o.hsCoachEnabled;
+	if (hce !== void 0 && typeof hce !== "boolean") return null;
+	const hch = o.hsCoachHotkey;
+	if (hch !== void 0 && !topFieldValid("hsCoachHotkey", hch)) return null;
+	const hlp = o.hsLogPath;
+	if (hlp !== void 0 && typeof hlp !== "string") return null;
 	const cts = o.confineToScreen;
 	if (cts !== void 0 && typeof cts !== "boolean") return null;
 	const ph = o.physics;
@@ -1324,6 +1970,9 @@ function saveUserConfig(raw, existing) {
 	if (cie !== void 0) outConfig.chatImageEnabled = cie;
 	if (hs !== void 0) outConfig.hearthstoneMode = hs;
 	if (hsa !== void 0) outConfig.hearthstoneAuto = hsa;
+	if (hce !== void 0) outConfig.hsCoachEnabled = hce;
+	if (hch !== void 0) outConfig.hsCoachHotkey = String(hch).trim();
+	if (hlp !== void 0) outConfig.hsLogPath = String(hlp);
 	if (cts !== void 0) outConfig.confineToScreen = cts;
 	if (ph !== void 0) outConfig.physics = ph;
 	if (fo !== void 0) outConfig.font = fo;
@@ -1337,6 +1986,9 @@ function saveUserConfig(raw, existing) {
 	if (cie !== void 0) bodyOwned.add("chatImageEnabled");
 	if (hs !== void 0) bodyOwned.add("hearthstoneMode");
 	if (hsa !== void 0) bodyOwned.add("hearthstoneAuto");
+	if (hce !== void 0) bodyOwned.add("hsCoachEnabled");
+	if (hch !== void 0) bodyOwned.add("hsCoachHotkey");
+	if (hlp !== void 0) bodyOwned.add("hsLogPath");
 	if (cts !== void 0) bodyOwned.add("confineToScreen");
 	if (ph !== void 0) bodyOwned.add("physics");
 	if (fo !== void 0) bodyOwned.add("font");
@@ -4210,6 +4862,74 @@ function apply(ctx) {
 			...result.image ? { image: result.image } : {}
 		};
 	};
+	/** ===== 炉石教练：读 Power.log → 还原场面 → 一句话建议 ===== */
+	let coachBusy = false;
+	let coachHotkeyState = { combo: "", registered: false, error: "" };
+	let coachLastAt = 0;
+	const coachSay = (petId, text) => {
+		state.writePet(petId, "say", { text });
+		return {
+			ok: true,
+			text
+		};
+	};
+	const coachFail = (petId, reason, message) => {
+		if (petId) state.writePet(petId, "say", { text: message });
+		return {
+			ok: false,
+			reason,
+			message
+		};
+	};
+	const coachAdvice = async (petId, withDebug = false) => {
+		const cfg0 = readAllConfig(configPaths);
+		const found = findPetInstance(cfg0, petId);
+		if (!found) return {
+			ok: false,
+			reason: "unknown-pet",
+			message: "没有这只桌宠：" + petId
+		};
+		if (cfg0.main?.hsCoachEnabled !== true) return coachFail(petId, "disabled", "教练没开（设置里打开）");
+		if (coachBusy) return {
+			ok: false,
+			reason: "busy",
+			message: "还在算上一条"
+		};
+		const now = Date.now();
+		if (now - coachLastAt < 1500) return {
+			ok: false,
+			reason: "busy",
+			message: "手太快了"
+		};
+		coachBusy = true;
+		coachLastAt = now;
+		try {
+			const log = findLatestPowerLog(String(cfg0.main?.hsLogPath || ""));
+			if (!log) return coachFail(petId, "no-log", "没找到 Power.log：确认炉石开着、日志目录正确");
+			const st = parsePowerLog(extractLatestGame(readFileTail(log.path, HS_COACH_LOG_TAIL_BYTES)));
+			const lookup = loadHsCardDb(userRoot);
+			const snap = buildSnapshot(st, lookup);
+			if (!snap.turn) return coachFail(petId, "no-game", "还没进对局呢");
+			if (snap.gameOver) return coachFail(petId, "game-over", "这局已经结束了");
+			if (!snap.myTurn) return coachFail(petId, "not-my-turn", "等你回合再问");
+			const playable = snap.me.hand.filter((c) => c.cost <= snap.me.mana.max - snap.me.mana.used);
+			const attackers = snap.me.board.filter((x) => x.canAttack && !x.frozen);
+			if (playable.length === 0 && attackers.length === 0) return coachSay(petId, "这回合打不出牌也没法攻击，过。");
+			const stateText = formatState(snap);
+			const result = await generateCoachText(ctx, coachSystemPrompt(), stateText + "\n请给出这一步的最优操作。", configuredModel(found.conf, "whisperModel"));
+			if (!result.ok) return coachFail(petId, result.reason, "算不了：" + (result.message || result.reason));
+			const said = coachSay(petId, cleanCoachAdvice(result.text) || "这手我也没想好");
+			return withDebug ? {
+				...said,
+				state: stateText
+			} : said;
+		} catch (e) {
+			return coachFail(petId, "exception", "教练出错：" + (e instanceof Error ? e.message : String(e)));
+		} finally {
+			coachBusy = false;
+		}
+	};
+
 	/** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 把回复写进 S 的 pets.<id>.say。
 	*  供 POST /chat（动作端点）与 /chat 命令共用同一条路径（锁内读写，防两端交错写盘）。
 	*  配图（chatImageEnabled 开启时）：把表情包清单交给模型按语境选一张，命中池内才随回复写回。
@@ -5074,6 +5794,42 @@ function apply(ctx) {
 					}
 				};
 			}
+		}
+		if (rest === "coach-status") {
+			let electronProbe = "unavailable";
+			try {
+				const el = require("electron");
+				electronProbe = typeof el + (el && el.globalShortcut ? " +globalShortcut" : "");
+			} catch (e) {
+				electronProbe = "throw: " + (e instanceof Error ? e.message : String(e));
+			}
+			const log = findLatestPowerLog(String(readAllConfig(configPaths).main?.hsLogPath || ""));
+			return {
+				kind: "json",
+				status: 200,
+				obj: {
+					hotkey: coachHotkeyState,
+					log: log ? {
+						path: log.path,
+						mtime: log.mtime,
+						size: log.size
+					} : null,
+					coachEnabled: readAllConfig(configPaths).main?.hsCoachEnabled === true,
+					electron: electronProbe
+				}
+			};
+		}
+		if (rest === "coach") {
+			if (method !== "POST") return {
+				kind: "json",
+				status: 405,
+				obj: { error: "method not allowed" }
+			};
+			return {
+				kind: "json",
+				status: 200,
+				obj: await coachAdvice(String(url.searchParams.get("pet") || "main"), url.searchParams.get("debug") === "1")
+			};
 		}
 		if (rest === "whisper") {
 			if (method !== "POST") return {
@@ -5977,6 +6733,137 @@ function apply(ctx) {
 			if (timer !== null) clearTimeout(timer);
 		};
 	}, "dsh-pet: whisper poll");
+	/**
+	* 炉石教练的全局快捷键（系统级，游戏全屏也收得到）。
+	* 宿主是纯 Node 进程，没有 globalShortcut，所以复用餐桌宠已经备好的 Electron：
+	* 起一个无窗口的 Electron 小助手注册快捷键，按下就 POST 回宿主的 /coach。
+	* 每 30 秒对一次配置：开关关掉 → 停掉小助手；快捷键改了 → 重启小助手。
+	*/
+	ctx.effect(() => {
+		let disposed = false;
+		let child = null;
+		let currentCombo = "";
+		const stop = () => {
+			if (child) {
+				try {
+					child.kill();
+				} catch {}
+				child = null;
+			}
+			currentCombo = "";
+			coachHotkeyState = {
+				combo: "",
+				registered: false,
+				error: "已停止"
+			};
+		};
+		const start = (combo) => {
+			const electronExe = resolveElectronPath([]);
+			if (!electronExe) {
+				coachHotkeyState = {
+					combo,
+					registered: false,
+					error: "没找到 Electron（先在桌宠里启用桌面模式会自动下载）"
+				};
+				return;
+			}
+			const port = typeof ctx.webServer?.port === "number" ? ctx.webServer.port : 0;
+			if (!port) {
+				coachHotkeyState = {
+					combo,
+					registered: false,
+					error: "拿不到本机端口"
+				};
+				return;
+			}
+			const url = `http://127.0.0.1:${port}${ROUTE_PREFIX}/coach?pet=` + encodeURIComponent(String(resolveActivePetId() || "main"));
+			const script = join(packageRoot, "runtime", "coach-hotkey", "main.cjs");
+			if (!existsSync(script)) {
+				coachHotkeyState = {
+					combo,
+					registered: false,
+					error: "缺少 runtime/coach-hotkey/main.cjs"
+				};
+				return;
+			}
+			const childEnv = {
+				...process.env
+			};
+			delete childEnv.ELECTRON_RUN_AS_NODE;
+			try {
+				child = spawn(electronExe, [script, combo, url], {
+					windowsHide: true,
+					stdio: ["ignore", "pipe", "pipe"],
+					env: childEnv
+				});
+			} catch (e) {
+				child = null;
+				coachHotkeyState = {
+					combo,
+					registered: false,
+					error: e instanceof Error ? e.message : String(e)
+				};
+				return;
+			}
+			currentCombo = combo;
+			coachHotkeyState = {
+				combo,
+				registered: false,
+				error: "正在注册…"
+			};
+			let out = "";
+			child.stdout?.on("data", (chunk) => {
+				out += chunk;
+				if (out.includes("READY")) coachHotkeyState = {
+					combo,
+					registered: true,
+					error: ""
+				};
+				else if (out.includes("FAILED")) coachHotkeyState = {
+					combo,
+					registered: false,
+					error: "快捷键被别的程序占用"
+				};
+			});
+			child.stderr?.on("data", () => {});
+			child.on("error", (e) => {
+				coachHotkeyState = {
+					combo,
+					registered: false,
+					error: e instanceof Error ? e.message : String(e)
+				};
+			});
+			child.on("exit", () => {
+				child = null;
+			});
+		};
+		const tick = () => {
+			if (disposed) return;
+			let cfg2;
+			try {
+				cfg2 = readAllConfig(configPaths);
+			} catch {
+				return;
+			}
+			const enabled = cfg2.main?.hsCoachEnabled === true;
+			const combo = String(cfg2.main?.hsCoachHotkey || HS_COACH_DEFAULT_HOTKEY).trim() || HS_COACH_DEFAULT_HOTKEY;
+			if (!enabled) {
+				if (child) stop();
+				return;
+			}
+			if (child && combo === currentCombo) return;
+			if (child) stop();
+			start(combo);
+		};
+		tick();
+		const timer = setInterval(tick, 3e4);
+		return () => {
+			disposed = true;
+			clearInterval(timer);
+			stop();
+		};
+	}, "dsh-pet: coach hotkey");
+
 	/**
 	* 炉石自动检测：hearthstoneAuto 开着时每 8s 扫一次进程，开游戏 → 炉石模式开，
 	* 关游戏 → 炉石模式关（写回用户配置，UI 与行为一致）。

@@ -2252,6 +2252,15 @@ const zh = {
 	hearthstoneAutoToggleHint: "开启后每 8 秒检测一次炉石客户端进程：游戏启动 → 自动开启炉石模式；游戏退出 → 自动关闭。自动开着时以进程检测为准（手动开关只在两次切换之间临时生效）。关掉自动后检测立即停止，炉石模式保留你最后一次的设置。",
 	hearthstoneTitle: "炉石模式",
 	hearthstoneHint: "把碎碎念的语料换成炉石梗（语料见 lib/index.js 的 HEARTHSTONE_LINES），支持手动开关，也可以跟着游戏进程自动切换。全局生效，保存后写进用户配置。",
+	hsCoachTitle: "出牌教练",
+	hsCoachHint: "按快捷键读取最新的 Power.log，把当前场面交给模型，给一句 30 字以内的出牌建议（直接冒在桌宠气泡里）。只在按键那一刻计算，对手回合或对局结束会直接提示。只读日志，不读内存、不操作游戏，酒馆战棋不支持。",
+	hsCoachToggle: "出牌教练",
+	hsCoachToggleHint: "开启后快捷键才生效。建议内容是一句话，例如「寒冰箭点 3/2，剩 2 费留着」；算不出来会在气泡里说明原因。",
+	hsCoachHotkeyLabel: "教练快捷键",
+	hsCoachHotkeyHint: "Electron 全局快捷键写法（Ctrl / Alt / Shift + 字母数字），默认 Ctrl+Alt+H。改完要重启 DSH 才会重新注册；游戏全屏时也能按。",
+	hsCoachHotkeyRequired: "快捷键不能为空。",
+	hsLogPathLabel: "Power.log 路径（可选）",
+	hsLogPathHint: "留空 = 自动探测炉石安装目录下的 Logs（含时间戳子目录，取最新的 Power.log）。换机器或自定义目录时才需要填。",
 	chatImageToggle: "对话配图",
 	chatImageToggleHint: "对话时由 AI 按当前语境从表情包池挑一张配图（可不挑；图片映射在配置文件顶层 memes）。token：每条消息都要把整张清单附进请求，当前约 1.1k 字符（≈650 token，约碎碎念配图的 11 倍），并随图片数量线性增长；关掉则一个字符都不附。",
 	confineToggle: "锁定在当前屏幕",
@@ -2410,6 +2419,15 @@ const en = {
 	hearthstoneAutoToggleHint: "Checks for the Hearthstone client every 8 seconds: game started → Hearthstone mode turns on; game closed → it turns off. While this is on, detection wins (the manual switch only holds between transitions). Turning it off stops detection and keeps your last setting.",
 	hearthstoneTitle: "Hearthstone mode",
 	hearthstoneHint: "Swaps the whisper corpus for Hearthstone memes (corpus: HEARTHSTONE_LINES in lib/index.js). Switch it manually, or let it follow the game process. Global; saved into the user config.",
+	hsCoachTitle: "Play coach",
+	hsCoachHint: "On the hotkey, reads the newest Power.log, sends the board to the model and shows a one-line play suggestion in the pet bubble. Computed only on keypress; opponent turn or a finished game gets a short note. Log-only: no memory reads, no input automation. Constructed only.",
+	hsCoachToggle: "Play coach",
+	hsCoachToggleHint: "The hotkey only works while this is on. The suggestion is one short line, e.g. \"Frostbolt the 3/2, keep 2 mana\"; failures are explained in the bubble.",
+	hsCoachHotkeyLabel: "Coach hotkey",
+	hsCoachHotkeyHint: "Electron accelerator syntax (Ctrl / Alt / Shift + key), default Ctrl+Alt+H. Re-registering needs a DSH restart; works while the game is fullscreen.",
+	hsCoachHotkeyRequired: "The hotkey cannot be empty.",
+	hsLogPathLabel: "Power.log path (optional)",
+	hsLogPathHint: "Leave empty to auto-detect the Hearthstone Logs directory (including timestamped subfolders, newest Power.log wins). Fill only for custom installs or another machine.",
 	chatImageToggle: "Chat images",
 	chatImageToggleHint: "Let the AI pick one meme from the pool that fits the current context (optional; mapping lives in the top-level `memes` config field). Tokens: every message carries the whole catalog — currently ~1.1k chars (~650 tokens, about 11x the whisper case) and growing with the number of images; turning this off appends nothing at all.",
 	confineToggle: "Lock to the current screen",
@@ -2866,6 +2884,9 @@ function makePetConfigSection(rt) {
 		const [whisperImage, setWhisperImage] = useState(false);
 		const [hearthstone, setHearthstone] = useState(false);
 		const [hearthstoneAuto, setHearthstoneAuto] = useState(false);
+		const [coachEnabled, setCoachEnabled] = useState(false);
+		const [coachHotkey, setCoachHotkey] = useState("Ctrl+Alt+H");
+		const [coachLogPath, setCoachLogPath] = useState("");
 		const [chatImage, setChatImage] = useState(false);
 		const [confineScreen, setConfineScreen] = useState(false);
 		const [physics, setPhysics] = useState({ ...DEFAULT_PHYSICS });
@@ -2901,6 +2922,9 @@ function makePetConfigSection(rt) {
 			if (typeof m.whisperImageEnabled === "boolean") setWhisperImage(m.whisperImageEnabled);
 			if (typeof m.hearthstoneMode === "boolean") setHearthstone(m.hearthstoneMode);
 			if (typeof m.hearthstoneAuto === "boolean") setHearthstoneAuto(m.hearthstoneAuto);
+			if (typeof m.hsCoachEnabled === "boolean") setCoachEnabled(m.hsCoachEnabled);
+			if (typeof m.hsCoachHotkey === "string" && m.hsCoachHotkey.trim()) setCoachHotkey(m.hsCoachHotkey);
+			if (typeof m.hsLogPath === "string") setCoachLogPath(m.hsLogPath);
 			if (typeof m.chatImageEnabled === "boolean") setChatImage(m.chatImageEnabled);
 			if (typeof m.confineToScreen === "boolean") setConfineScreen(m.confineToScreen);
 			if (m.physics && typeof m.physics === "object") setPhysics({
@@ -3042,6 +3066,13 @@ function makePetConfigSection(rt) {
 				});
 				return false;
 			}
+			if (!String(coachHotkey).trim()) {
+				setMsg({
+					kind: "err",
+					text: t("hsCoachHotkeyRequired")
+				});
+				return false;
+			}
 			if (!FONT_PRESETS.some((p) => p.id === font.family) || !Number.isFinite(font.size) || font.size < FONT_SIZE_MIN || font.size > FONT_SIZE_MAX) {
 				setMsg({
 					kind: "err",
@@ -3067,6 +3098,9 @@ function makePetConfigSection(rt) {
 					whisperImageEnabled: whisperImage,
 					hearthstoneMode: hearthstone,
 					hearthstoneAuto,
+					hsCoachEnabled: coachEnabled,
+					hsCoachHotkey: coachHotkey,
+					hsLogPath: coachLogPath,
 					chatImageEnabled: chatImage,
 					confineToScreen: confineScreen,
 					physics,
@@ -3401,7 +3435,29 @@ function makePetConfigSection(rt) {
 						className: "dsh-pet-cfg__grid4",
 						children: [
 							toggleCell("hearthstoneToggle", hearthstone, busy, setHearthstone),
-							toggleCell("hearthstoneAutoToggle", hearthstoneAuto, busy, setHearthstoneAuto, true)
+							toggleCell("hearthstoneAutoToggle", hearthstoneAuto, busy, setHearthstoneAuto),
+							toggleCell("hsCoachToggle", coachEnabled, busy, setCoachEnabled, true)
+						]
+					}), h("div", {
+						className: "dsh-pet-cfg__grid2",
+						children: [
+							field(t("hsCoachHotkeyLabel"), h("input", {
+								type: "text",
+								className: inputClass,
+								value: coachHotkey,
+								disabled: busy,
+								maxLength: 40,
+								onChange: (e) => setCoachHotkey(e.target.value)
+							}), t("hsCoachHotkeyHint")),
+							field(t("hsLogPathLabel"), h("input", {
+								type: "text",
+								className: inputClass,
+								value: coachLogPath,
+								disabled: busy,
+								maxLength: 300,
+								placeholder: "D:\\Battle.net\\Hearthstone\\Logs",
+								onChange: (e) => setCoachLogPath(e.target.value)
+							}), t("hsLogPathHint"), true)
 						]
 					})]
 				}),
@@ -5742,7 +5798,43 @@ function makeFactory() {
 			"remote.commands",
 			"commandUi"
 		];
+
+/** 匹配 "Ctrl+Alt+H" 这类组合键（全局快捷键没注册上时，页面内也能触发） */
+function matchesPetHotkey(e, combo) {
+	const parts = String(combo || "").split("+").map((s) => s.trim().toLowerCase()).filter(Boolean);
+	if (parts.length === 0) return false;
+	const key = parts[parts.length - 1];
+	const mods = new Set(parts.slice(0, -1));
+	const wantCtrl = mods.has("ctrl") || mods.has("control");
+	const wantAlt = mods.has("alt") || mods.has("option");
+	const wantShift = mods.has("shift");
+	const wantMeta = mods.has("meta") || mods.has("cmd") || mods.has("command") || mods.has("super");
+	if (!!e.ctrlKey !== wantCtrl || !!e.altKey !== wantAlt || !!e.shiftKey !== wantShift || !!e.metaKey !== wantMeta) return false;
+	const k = String(e.key || "").toLowerCase();
+	if (key === "space") return k === " " || k === "spacebar";
+	if (key === "enter") return k === "enter";
+	return k === key;
+}
+
 		function apply(ctx) {
+			ctx.effect(() => {
+				let combo = "Ctrl+Alt+H";
+				let disposed = false;
+				fetch("/dsh-pet-7340/config").then((r) => r.ok ? r.json() : null).then((m) => {
+					const v = m?.main?.hsCoachHotkey;
+					if (!disposed && typeof v === "string" && v.trim()) combo = v.trim();
+				}).catch(() => {});
+				const onKey = (e) => {
+					if (e.repeat || !matchesPetHotkey(e, combo)) return;
+					e.preventDefault();
+					fetch("/dsh-pet-7340/coach?pet=main", { method: "POST" }).catch(() => {});
+				};
+				window.addEventListener("keydown", onKey, true);
+				return () => {
+					disposed = true;
+					window.removeEventListener("keydown", onKey, true);
+				};
+			}, "dsh-pet: coach hotkey (client)");
 			ctx.effect(() => ctx.locale.register(NS, {
 				zh,
 				en

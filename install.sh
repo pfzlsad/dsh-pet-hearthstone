@@ -16,6 +16,10 @@ cp "$ROOT/plugin/lib/index.js"  "$TARGET/lib/index.js"
 cp "$ROOT/plugin/lib/client.js" "$TARGET/lib/client.js"
 echo "已覆盖 lib/index.js, lib/client.js"
 
+mkdir -p "$TARGET/runtime/coach-hotkey"
+cp "$ROOT/plugin/runtime/coach-hotkey/main.cjs" "$TARGET/runtime/coach-hotkey/main.cjs"
+echo "已覆盖 runtime/coach-hotkey/main.cjs（教练快捷键小助手）"
+
 if [ "${SKIP_CONFIG:-0}" != "1" ]; then
   cp "$ROOT/plugin/assets/config.jsonc" "$TARGET/assets/config.jsonc"
   echo "已覆盖 assets/config.jsonc（内置默认值；用户配置 main-config.jsonc 不受影响）"
@@ -25,3 +29,6 @@ echo
 echo "装好了。重启 DSH 后生效；配置在 ~/.dsh/dsh-pet/main-config.jsonc："
 echo "  hearthstoneMode = true/false   手动开关"
 echo "  hearthstoneAuto = true/false   随炉石游戏进程自动切换"
+echo "  hsCoachEnabled  = true/false   出牌教练开关"
+echo "  hsCoachHotkey   = Ctrl+Alt+H   教练全局快捷键"
+echo "  hsLogPath       = ''           自定义 Power.log 路径（留空自动探测）"

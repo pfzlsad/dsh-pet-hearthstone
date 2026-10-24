@@ -1,93 +1,93 @@
-# dsh-pet 炉石模式（个人备份）
+# dsh-pet 炉石模式 + 出牌教练（个人备份）
 
 > 基于 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) **v0.3.8** 的个人修改版备份。
-> 上游 MIT License © 2026 PC2005-cloud；本仓库只是加了「炉石模式」的补丁，非官方版本。
+> 上游 MIT License © 2026 PC2005-cloud；本仓库只是加了两块功能的补丁，非官方版本。
 
-- 备份日期：2026-10-23
+- 备份日期：2026-10-24
 - 上游版本：`dsh-pet@0.3.8`
 - 运行环境：DSH（DeepSeek Harness）桌面版，Web GUI 内嵌桌宠
 
-## 这个补丁做了什么
-
-给桌宠的「碎碎念」加了一套炉石梗语料，可以手动开关，也可以跟着炉石客户端自动切换。
+## 功能
 
 | 功能 | 行为 |
 | --- | --- |
-| **炉石模式** | 开启后碎碎念不再用「人设」，改用炉石梗（卡牌台词 / 主播名场面 / 天梯吐槽 / 酒馆战棋黑话），20 字以内一句，每次引一句原梗或造一句同风格的新梗 |
-| **随炉石自动切换** | 每 8 秒检测一次炉石客户端进程（Windows `tasklist`，macOS/Linux `pgrep`，进程名含 `Hearthstone`）：游戏启动 → 自动开启；游戏退出 → 自动关闭，并把状态写回用户配置 |
-| 作用范围 | **只影响碎碎念**（周期自动、右键「碎碎念」、`pet` 命令留空）；普通对话人设不变 |
+| **炉石模式** | 碎碎念不再用「人设」，改用炉石梗（卡牌台词 / 主播名场面 / 天梯吐槽），20 字以内一句 |
+| **随炉石自动切换** | 每 8 秒检测一次炉石进程：游戏启动自动开、退出自动关，并写回用户配置 |
+| **出牌教练** | 按全局快捷键读取最新 `Power.log`，还原当前构筑对局（标准/狂野），让模型给**一句** 30 字以内的出牌建议，直接冒在桌宠气泡里 |
 
-两个开关都在 设置 → 桌宠 → 「炉石模式」卡片里。
+作用范围：炉石模式只影响碎碎念；教练只在按键时计算，对手回合 / 对局结束 / 没日志会直接在气泡里说明。
 
-语料在 `plugin/lib/index.js` 的 `HEARTHSTONE_LINES` 数组里，一行一条，直接加即可。
+## 出牌教练怎么工作
+
+```
+快捷键 Ctrl+Alt+H
+   → Electron 无窗口小助手（runtime/coach-hotkey）捕获系统级按键
+   → POST /dsh-pet-7340/coach
+   → 找最新的 Power.log（D:\Battle.net\Hearthstone\Logs、LocalAppData、Saved Games 都扫）
+   → 截出最后一局，解析 CREATE_GAME / FULL_ENTITY / TAG_CHANGE / BLOCK_START
+   → 还原：回合、双方英雄血甲、法力、手牌（含卡面文字）、双方场面随从与关键词、奥秘、牌库、最近动作
+   → 卡名用 HDT 的 CardDefs.base.xml 补中文（并缓存成 hs-carddb.json）
+   → 交给当前模型，输出一句话 → 写进桌宠气泡
+```
+
+边界：只读日志，不读内存、不注入、不自动操作游戏；只支持构筑（酒馆战棋/竞技场不支持）；结论不保证正确，自己判断。
+
+## 配置项（`~/.dsh/dsh-pet/main-config.jsonc`）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `hearthstoneMode` | boolean | `false` | 手动开关：碎碎念走炉石语料 |
+| `hearthstoneAuto` | boolean | `false` | 按炉石进程自动改 `hearthstoneMode` |
+| `hsCoachEnabled` | boolean | `false` | 出牌教练开关（关闭时也会停掉快捷键小助手） |
+| `hsCoachHotkey` | string | `"Ctrl+Alt+H"` | 全局快捷键；改了 30 秒内自动重启小助手 |
+| `hsLogPath` | string | `""` | 可选：自定义 Power.log 文件/目录；留空自动探测 |
+
+设置页：设置 → 桌宠 →「炉石模式」卡片里有全部开关 + 快捷键/日志路径输入框。
 
 ## 目录结构
 
 ```
-plugin/                         # 打完补丁的完整 dsh-pet 包（可直接覆盖安装）
-patches/hearthstone-mode.patch  # 相对 v0.3.8 原版的 unified diff（git apply -p1）
-install.ps1 / install.sh        # 把 plugin/ 里的文件装回 DSH profile
+plugin/                          # 打完补丁的完整 dsh-pet 包（可直接覆盖安装）
+patches/hearthstone-mode.patch   # 相对 v0.3.8 的 lib/*.js + config.jsonc 补丁
+install.ps1 / install.sh         # 把 plugin/ 装回 DSH profile（含 runtime/coach-hotkey）
 ```
 
 ## 恢复 / 安装
 
-### 方式一：直接拷贝（推荐）
-
 ```powershell
-# 关掉 DSH 后执行；默认装到 desktop profile
+# 关掉 DSH 后执行；默认 desktop profile
 .\install.ps1
-# 自定义 profile 目录：
-.\install.ps1 -ProfileDir "C:\Users\you\.dsh\profiles\desktop"
 ```
 
 ```bash
-./install.sh                       # 默认 ~/.dsh/profiles/desktop
-./install.sh /path/to/profile
+./install.sh
 ```
 
-装完重启 DSH（主机侧代码在启动时加载）。
+装完重启 DSH。注意 `runtime/coach-hotkey/main.cjs` 是教练快捷键要用的小助手，安装脚本会一起拷过去。
 
-### 方式二：在官方包上打补丁
+## 依赖
 
-```bash
-# 先安装同版本官方包
-pnpm add dsh-pet@0.3.8
-# 进入 node_modules/dsh-pet，应用补丁
-git apply -p1 /path/to/patches/hearthstone-mode.patch
-```
-
-## 配置项（用户配置文件 `~/.dsh/dsh-pet/main-config.jsonc`）
-
-| 键 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `hearthstoneMode` | boolean | `false` | 手动开关。开启后碎碎念走炉石语料 |
-| `hearthstoneAuto` | boolean | `false` | 自动开关。开启后按炉石进程自动改 `hearthstoneMode` |
-
-自动模式开着时以进程检测为准；关掉自动后检测停止，`hearthstoneMode` 保持最后一次的值。
+- **Electron**：快捷键小助手复用桌宠已经下载好的 `~/.dsh/electron/electron.exe`；没下载过就先在桌宠里开一次桌面模式，或跑 `node scripts/ensure-electron.mjs`。小助手常驻约 150–200MB 内存，教练关闭时会被停掉。
+- **HDT 卡牌库（可选）**：`%APPDATA%\HearthstoneDeckTracker\CardDefs\CardDefs.base.xml` 提供中文卡名和卡面文字，首次使用会缓存成 `~/.dsh/dsh-pet/hs-carddb.json`。没有 HDT 也能用，只是卡名回落到日志里的实体名。
+- **炉石日志**：客户端自己写，`log.config` 需要 `[Power] Verbose=True`（HDT 会自动配好；本机路径 `D:\Battle.net\Hearthstone\Logs\Hearthstone_<时间戳>\Power.log`）。
 
 ## 改了哪些文件
 
 | 文件 | 改动 |
 | --- | --- |
-| `lib/index.js` | 新增 `HEARTHSTONE_LINES` / `HEARTHSTONE_USER_TEXT` / `hearthstonePersona()` / `hearthstoneSystemPrompt()` / `detectHearthstoneProcess()`；`publishWhisper` 按 `hearthstoneOn(conf)` 分支；新增自动检测定时器；配置白名单、校验、保存白名单加两个字段 |
-| `lib/client.js` | 设置页新增「炉石模式」卡片（两个开关）；中英文案；读取/保存两个字段 |
-| `assets/config.jsonc` | 内置默认值 `hearthstoneMode: false`、`hearthstoneAuto: false` + 注释 |
-
-校验和（SHA-256）：
-
-```
-index.js         d6020bfc06721ac0208cc1bfdf831cbf7d31277f3e3e0d4a52511fc4399bcdae
-client.js        97075c5ca5d8885f5431b2bc89a5882c4d2eebb1e2272d179bb01278aba07ade
-config.jsonc     4433dcdac482c18573e92dee17489788fdecbeba85c29cb13e3d67e062d973db
-```
+| `lib/index.js` | 炉石语料与自动检测；教练核心（日志解析 / 场面快照 / 卡牌库 / 提示词 / `/coach` 路由 / 快捷键小助手管理）；配置字段 |
+| `lib/client.js` | 设置页「炉石模式」卡：三个开关 + 快捷键 + 日志路径；页面内快捷键兜底；中英文案 |
+| `assets/config.jsonc` | 新增 5 个默认值 + 注释 |
+| `runtime/coach-hotkey/main.cjs` | 新增：Electron 无窗口快捷键助手（globalShortcut → POST /coach） |
 
 ## 已知限制
 
-- **上游升级会覆盖补丁**：dsh-pet 从商城更新后，`lib/*.js` 被整体替换，补丁消失，需要按上面的方式重装。
-- 补丁直接改的是**发布产物**（`lib/*.js`），不是上游 TS 源码；上游源码在 `plugin/src/` 里可对照，但没有构建链（tsdown / rolldown 不在发布包里）。
-- 自动检测每 8 秒 spawn 一次 `tasklist`（Windows），属于轻量轮询；不需要时会立即停止。
-- 计划中的「局势判断 + 出牌推荐」**尚未实现**，本备份只包含炉石语料与自动切换。
+- 上游升级会覆盖 `lib/*.js` 与 `assets/config.jsonc`，补丁和教练功能都会消失，按上面方式重装。
+- 直接改的是发布产物（`lib/*.js`），不是上游 TS 源码；源码在 `plugin/src/` 可对照，但构建链未随包发布。
+- 教练只解析 GameState 事件；游戏结束后日志尾部可能只有 PowerTaskList，因此「已结束」判断可能滞后一两条事件。
+- 不解析英雄技能冷却、任务进度、对手手牌明细（本来也看不到）。
+- 建议仅用于自己练习复盘，正式比赛请遵守赛事规则。
 
 ## 免责声明
 
-个人备份用途，与上游项目及暴雪娱乐无关。自动检测只读取本机进程名，不改动游戏、不注入内存、不自动操作游戏。
+个人备份用途，与上游项目及暴雪娱乐无关。功能只读取本机日志、不修改游戏、不自动化操作。
