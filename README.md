@@ -30,6 +30,7 @@
 ```
 
 边界：只读日志，不读内存、不注入、不自动操作游戏；只支持构筑（酒馆战棋/竞技场不支持）；结论不保证正确，自己判断。
+手动按快捷键时：我方回合给建议，对手回合给解说（可在设置里关掉解说）。
 
 ## 配置项（`~/.dsh/dsh-pet/main-config.jsonc`）
 
@@ -80,6 +81,16 @@ install.ps1 / install.sh         # 把 plugin/ 装回 DSH profile（含 runtime/
 | `lib/client.js` | 设置页「炉石模式」卡：三个开关 + 快捷键 + 日志路径；页面内快捷键兜底；中英文案 |
 | `assets/config.jsonc` | 新增 5 个默认值 + 注释 |
 | `runtime/coach-hotkey/main.cjs` | 新增：Electron 无窗口快捷键助手（globalShortcut → POST /coach） |
+
+## 解析修复记录（2026-10-24）
+
+针对「推荐了头上挂着的牌」「对面费用说错」这类问题，定位并修了 4 个解析 bug + 1 个防幻觉机制：
+
+1. `SHOW_ENTITY - Updating Entity=30` 这类**数字引用**以前解析成 id 0，所有揭示/变身都堆到一个幽灵实体上（会把「永恒真爱」这种光环当成手牌）。
+2. `FULL_ENTITY - Updating [entityName=UNKNOWN ENTITY [cardType=INVALID] id=71 ...]` 的**嵌套方括号**以前被正则截断，实体更新整条丢失。
+3. 炉石会**回收实体 id**：同一个 id 重新 `FULL_ENTITY - Creating` 时现在会清空旧标签，避免已死亡随从「复活」。
+4. `TAG_CHANGE` 引用里的 `zone=/player=` 是**改之前的快照**，以前会覆盖真实状态（`ZONE=GRAVEYARD` 之后紧跟的 `HEALTH` 又把随从拉回场上）；现在只用来补空字段。
+5. 建议输出加了**合法性门禁**：提到的牌若不在手牌/场面清单里，带清单重试一次，仍不合格就退回规则兜底；同时要求费用/血量数字照抄局面。
 
 ## 已知限制
 

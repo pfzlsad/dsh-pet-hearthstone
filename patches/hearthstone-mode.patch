@@ -6,7 +6,7 @@
  import { mkdir, readFile, writeFile } from "node:fs/promises";
  import { homedir } from "node:os";
  import { dirname, join, normalize, resolve, sep } from "node:path";
-@@ -497,10 +497,696 @@
+@@ -497,10 +497,735 @@
  * 碎碎念指令：带表情包（用户开启 whisperImageEnabled 时）——要求模型配合作画说一句。
  * 明确「正文仍是一句话」：图是配图，不是让模型描述画面本身。
  */
@@ -285,40 +285,53 @@
 +    }
 +    mm = /^FULL_ENTITY - Creating ID=(\d+) CardID=(\S*)/.exec(payload);
 +    if (mm) {
-+      const ent = ensureEntity(state, Number(mm[1]));
++      const id = Number(mm[1]);
++      const ent = ensureEntity(state, id);
++      // 炉石会回收实体 id：同一个 id 重新 Creating 时把旧标签清干净，避免「死人」复活
++      ent.cardId = "";
++      ent.name = "";
++      ent.controller = 0;
++      ent.zone = "";
++      ent.cardType = "";
++      ent.position = 0;
++      ent.tags = {};
++      state.revealedHand.delete(id);
 +      if (mm[2]) ent.cardId = mm[2];
 +      ctx = ent;
 +      continue;
 +    }
-+    mm = /^FULL_ENTITY - Updating (\[.*?\]|Entity=\d+) CardID=(\S*)/.exec(payload);
++    mm = /^FULL_ENTITY - Updating (.+?) CardID=(\S*)/.exec(payload);
 +    if (mm) {
-+      const ref = parseRef(mm[1]);
++      const ref = parseRef(refText(mm[1]));
++      if (!ref.id) continue;
 +      const ent = ensureEntity(state, ref.id);
 +      if (mm[2]) ent.cardId = mm[2];
 +      if (ref.cardId && !ent.cardId) ent.cardId = ref.cardId;
-+      if (ref.player) ent.controller = ref.player;
-+      if (ref.name) ent.name = ref.name;
-+      if (ref.zone) ent.zone = ref.zone;
++      if (ref.player && !ent.controller) ent.controller = ref.player;
++      if (ref.name && !ent.name) ent.name = ref.name;
++      if (ref.zone && !ent.zone) ent.zone = ref.zone;
 +      ctx = ent;
 +      continue;
 +    }
-+    mm = /^SHOW_ENTITY - Updating (\[.*?\]|Entity=\d+) CardID=(\S*)/.exec(payload);
++    mm = /^SHOW_ENTITY - Updating (.+?) CardID=(\S*)/.exec(payload);
 +    if (mm) {
-+      const ref = parseRef(mm[1]);
++      const ref = parseRef(refText(mm[1]));
++      if (!ref.id) continue;
 +      const ent = ensureEntity(state, ref.id);
 +      if (mm[2]) ent.cardId = mm[2];
-+      if (ref.player) ent.controller = ref.player;
-+      if (ref.zone) ent.zone = ref.zone;
-+      if (ref.name) ent.name = ref.name;
++      if (ref.player && !ent.controller) ent.controller = ref.player;
++      if (ref.zone && !ent.zone) ent.zone = ref.zone;
++      if (ref.name && !ent.name) ent.name = ref.name;
 +      ctx = ent;
 +      continue;
 +    }
-+    mm = /^CHANGE_ENTITY - Updating (\[.*?\]|Entity=\d+) CardID=(\S*)/.exec(payload);
++    mm = /^CHANGE_ENTITY - Updating (.+?) CardID=(\S*)/.exec(payload);
 +    if (mm) {
-+      const ref = parseRef(mm[1]);
++      const ref = parseRef(refText(mm[1]));
++      if (!ref.id) continue;
 +      const ent = ensureEntity(state, ref.id);
 +      if (mm[2]) ent.cardId = mm[2];
-+      if (ref.player) ent.controller = ref.player;
++      if (ref.player && !ent.controller) ent.controller = ref.player;
 +      ctx = ent;
 +      continue;
 +    }
@@ -329,10 +342,10 @@
 +      if (!id) continue;
 +      const info = parseRef(ref);
 +      const ent = ensureEntity(state, id);
-+      if (info.cardId) ent.cardId = info.cardId;
-+      if (info.player) ent.controller = info.player;
-+      if (info.name) ent.name = info.name;
-+      if (info.zone) ent.zone = info.zone;
++      if (info.cardId && !ent.cardId) ent.cardId = info.cardId;
++      if (info.player && !ent.controller) ent.controller = info.player;
++      if (info.name && !ent.name) ent.name = info.name;
++      if (info.zone && !ent.zone) ent.zone = info.zone;
 +      applyTag(state, ent, mm[2], mm[3].trim());
 +      continue;
 +    }
@@ -391,7 +404,8 @@
 +
 +function hasTag(ent, name) {
 +  return ent.tags[name] === 1 || ent.tags[name] === "1";
-+}
+ }
+-async function generateWhisper(ctx, system, meme, preferred) {
 +
 +function minionView(ent, lookup) {
 +  const info = lookup(ent.cardId);
@@ -428,7 +442,7 @@
 +    let deckCount = 0;
 +    let weapon = null;
 +    for (const e of st.entities.values()) {
-+      if (e.controller !== playerId || !e.zone) continue;
++      if (!e.id || e.controller !== playerId || !e.zone) continue;
 +      if (e.zone === "HAND") hand.push(e);
 +      else if (e.zone === "PLAY" && e.cardType === "MINION") board.push(e);
 +      else if (e.zone === "PLAY" && e.cardType === "WEAPON") weapon = e;
@@ -463,7 +477,7 @@
 +          cost: typeof e.tags.COST === "number" ? e.tags.COST : (info.cost ?? 0),
 +          text: info.text || ""
 +        };
-+      }),
++      }).filter((c) => c.cardId),
 +      board: board.map((e) => minionView(e, lookup)),
 +      secrets: secrets.length,
 +      deckCount,
@@ -681,13 +695,39 @@
 +    "1. 只输出一句中文建议，不超过 30 个字，直接说操作和目标（带上卡名/随从名）。\n" +
 +    "2. 只能使用「本回合可用手牌」清单里列出的牌。没列出来的牌一律不许提，不要凭记忆补牌。\n" +
 +    "3. 场上随从可以攻击；能斩杀就先写斩杀，不能斩杀就给本回合性价比最高的一手。\n" +
-+    "4. 不要解释理由、不要加引号或前缀、不要分段。";
++    "4. 费用、血量、手牌数一律照抄局面里给的数字，不要自己加减或推算。\n" +
++    "5. 不要解释理由、不要加引号或前缀、不要分段。";
 +}
 +
 +/** 对手回合解说：只预测/点评，不给主人出牌建议 */
 +function coachFoeSystemPrompt() {
 +  return "你是《炉石传说》对局解说。只输出一句话（不超过 30 个字），根据对手的费用、场面和手牌数，预测他这一回合最可能做什么，或点出当前最大的威胁。\n" +
-+    "不要给主人出牌建议，不要用「你应该」，不要解释、不要引号、不要分段。";
++    "费用、血量、手牌数一律照抄局面里给的数字，不要自己加减。不要给主人出牌建议，不要用「你应该」，不要解释、不要引号、不要分段。";
++}
++
++/** 建议里提到的牌是否合法：合法牌池 = 我方手牌 + 双方场面。
++ *  提到任何合法牌名 → 放行；只提到清单外的牌、且像是让主人打出 → 返回那张牌名。 */
++function coachIllegalMention(advice, snap, lookup) {
++  const text = String(advice || "");
++  if (!text || !lookup.names) return null;
++  const legal = new Set();
++  for (const c of snap.me.hand) legal.add(c.name);
++  for (const m of snap.me.board) legal.add(m.name);
++  for (const m of snap.foe.board) legal.add(m.name);
++  let legalHit = false;
++  const illegal = [];
++  for (const name of lookup.names) {
++    if (name.length < 2) continue;
++    if (!text.includes(name)) continue;
++    if (legal.has(name)) legalHit = true;
++    else illegal.push(name);
++  }
++  if (legalHit || illegal.length === 0) return null;
++  for (const name of illegal) {
++    const pattern = new RegExp("(?:打|用|出|下|交|拍)[^，。；]{0,3}" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
++    if (pattern.test(text)) return name;
++  }
++  return illegal[0];
 +}
 +
 +/** 把模型输出压成干净的一行 */
@@ -698,15 +738,14 @@
 +    .split(/\r?\n/)[0]
 +    .trim()
 +    .slice(0, 60);
- }
--async function generateWhisper(ctx, system, meme, preferred) {
++}
 +
 +//#endregion
 +async function generateWhisper(ctx, system, meme, preferred, hearthstone = false) {
  	const candidates = modelCandidates(ctx, preferred);
  	if (candidates.length === 0) return {
  		ok: false,
-@@ -519,7 +1205,7 @@
+@@ -519,7 +1244,7 @@
  		message: noTextReason(void 0)
  	};
  	for (const [i, sel] of candidates.entries()) {
@@ -715,7 +754,7 @@
  		if (result.ok) return result;
  		last = result;
  		if (i + 1 < candidates.length) console.warn(`dsh-pet: 碎碎念用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`);
-@@ -527,8 +1213,8 @@
+@@ -527,8 +1252,8 @@
  	return last;
  }
  /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
@@ -726,7 +765,7 @@
  	const supportsOff = await supportsReasoningOff(ctx, sel.provider, sel.model);
  	const options = {
  		provider: sel.provider,
-@@ -537,12 +1223,12 @@
+@@ -537,12 +1262,12 @@
  		messages: [createUserMessage({
  			content: [{
  				type: "text",
@@ -741,7 +780,7 @@
  		...supportsOff ? { reasoningEffort: ReasoningEffortId("off") } : {},
  		signal: deadline
  	};
-@@ -573,6 +1259,35 @@
+@@ -573,6 +1298,35 @@
  }
  
  //#endregion
@@ -777,7 +816,7 @@
  //#region src/host/whisper-policy.ts
  function automaticWhisperSchedule(policy, petEnabled, configuredPeriodSec) {
  	if (!policy) return {
-@@ -804,6 +1519,13 @@
+@@ -804,6 +1558,13 @@
  	"whisperImageEnabled",
  	"chatImageEnabled",
  	"chatImageLimit",
@@ -791,7 +830,7 @@
  	"chatMemoryRounds",
  	"whisperModel",
  	"chatModel",
-@@ -972,6 +1694,13 @@
+@@ -972,6 +1733,13 @@
  		case "notificationsEnabled": return typeof value === "boolean";
  		case "whisperImageEnabled": return typeof value === "boolean";
  		case "chatImageEnabled": return typeof value === "boolean";
@@ -805,7 +844,7 @@
  		case "confineToScreen": return typeof value === "boolean";
  		case "animations": return animationsValid(value);
  		case "animationWeights": return weightsValid(value);
-@@ -1217,6 +1946,20 @@
+@@ -1217,6 +1985,20 @@
  	if (wie !== void 0 && typeof wie !== "boolean") return null;
  	const cie = o.chatImageEnabled;
  	if (cie !== void 0 && typeof cie !== "boolean") return null;
@@ -826,7 +865,7 @@
  	const cts = o.confineToScreen;
  	if (cts !== void 0 && typeof cts !== "boolean") return null;
  	const ph = o.physics;
-@@ -1239,6 +1982,13 @@
+@@ -1239,6 +2021,13 @@
  	if (ne !== void 0) outConfig.notificationsEnabled = ne;
  	if (wie !== void 0) outConfig.whisperImageEnabled = wie;
  	if (cie !== void 0) outConfig.chatImageEnabled = cie;
@@ -840,7 +879,7 @@
  	if (cts !== void 0) outConfig.confineToScreen = cts;
  	if (ph !== void 0) outConfig.physics = ph;
  	if (fo !== void 0) outConfig.font = fo;
-@@ -1250,6 +2000,13 @@
+@@ -1250,6 +2039,13 @@
  	if (ne !== void 0) bodyOwned.add("notificationsEnabled");
  	if (wie !== void 0) bodyOwned.add("whisperImageEnabled");
  	if (cie !== void 0) bodyOwned.add("chatImageEnabled");
@@ -854,7 +893,7 @@
  	if (cts !== void 0) bodyOwned.add("confineToScreen");
  	if (ph !== void 0) bodyOwned.add("physics");
  	if (fo !== void 0) bodyOwned.add("font");
-@@ -4005,6 +4762,10 @@
+@@ -4005,6 +4801,10 @@
  	};
  	let activePetId = "";
  	const lastWhisperAt = new Map();
@@ -865,7 +904,7 @@
  	const memoryPath = join(userRoot, "memory.json");
  	let chatQueue = Promise.resolve();
  	/** 读记忆文件：不存在 → 空；损坏 → 显式报错 + 备份原始文件（绝不静默丢数据）+ 重建空记忆 */
-@@ -4052,12 +4813,38 @@
+@@ -4052,12 +4852,38 @@
  		id: String(found.pet.id ?? ""),
  		now: new Date()
  	});
@@ -904,7 +943,7 @@
  	/** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
  	*  每只宠物独立生成（人设 = 它自己的 whisperPrompt，没写回落到所属条目）。生成成功就写进 S 的 pets.<id>.say——
  	*  碎碎念 / 命令气泡 / 对话回复在前端本来就是**同一条展示链路**（同一个 triggerWhisper、
-@@ -4075,9 +4862,10 @@
+@@ -4075,9 +4901,10 @@
  			reason: "unknown-pet",
  			message: "没有这只桌宠：" + petId
  		};
@@ -917,7 +956,7 @@
  		if (!result.ok) {
  			console.warn("[dsh-pet] 碎碎念生成失败 pet=" + petId + " reason=" + result.reason + (result.message ? " " + result.message : ""));
  			return result;
-@@ -4092,6 +4880,76 @@
+@@ -4092,6 +4919,101 @@
  			...result.image ? { image: result.image } : {}
  		};
  	};
@@ -925,6 +964,26 @@
 +	let coachBusy = false;
 +	let coachLookupCache = null;
 +	const coachLookup = () => coachLookupCache || (coachLookupCache = loadHsCardDb(userRoot));
++
++	/** 生成一句指导性建议：过一遍牌面合法性，不合格就带着清单重试一次，仍不合格退回规则兜底 */
++	const coachComposeAdvice = async (found, snap, lookup, stateText) => {
++		const model = configuredModel(found.conf, "whisperModel");
++		let r = await generateCoachText(ctx, coachSystemPrompt(), stateText + "\n现在轮到主人，请给出这一步的最优操作。", model);
++		if (!r.ok) return null;
++		let text = cleanCoachAdvice(r.text);
++		const bad = coachIllegalMention(text, snap, lookup);
++		if (bad) {
++			const names = snap.me.hand.map((c) => c.name).join("、") || "（空）";
++			r = await generateCoachText(ctx, coachSystemPrompt(), stateText + "\n注意：上一版建议打「" + bad + "」，它不在手牌里。只能用这些手牌：" + names + "。请重新给一句。", model);
++			if (r.ok) text = cleanCoachAdvice(r.text);
++		}
++		if (coachIllegalMention(text, snap, lookup)) {
++			const playable = snap.me.hand.filter((c) => c.cost <= snap.me.mana.max - snap.me.mana.used);
++			text = playable.length ? "从「" + playable.map((c) => c.name).join("、") + "」里挑一张打出，其余留着。" : "这回合打不出牌，过。";
++		}
++		return text;
++	};
++
 +	let coachHotkeyState = { combo: "", registered: false, error: "" };
 +	let coachLastAt = 0;
 +	const coachSay = (petId, text) => {
@@ -972,14 +1031,19 @@
 +			const snap = buildSnapshot(st, lookup);
 +			if (!snap.turn) return coachFail(petId, "no-game", "还没进对局呢");
 +			if (snap.gameOver) return coachFail(petId, "game-over", "这局已经结束了");
-+			if (!snap.myTurn) return coachFail(petId, "not-my-turn", "等你回合再问");
++			const stateText = formatState(snap);
++			if (!snap.myTurn) {
++				if (cfg0.main?.hsCoachOpponentTalk === false) return coachFail(petId, "not-my-turn", "等你回合再问");
++				const comment = await generateCoachText(ctx, coachFoeSystemPrompt(), stateText + "\n现在是对手回合，用一句话解说或预测他要做什么。", configuredModel(found.conf, "whisperModel"));
++				if (!comment.ok) return coachFail(petId, comment.reason, "算不了：" + (comment.message || comment.reason));
++				return coachSay(petId, cleanCoachAdvice(comment.text) || "看他这波想干嘛");
++			}
 +			const playable = snap.me.hand.filter((c) => c.cost <= snap.me.mana.max - snap.me.mana.used);
 +			const attackers = snap.me.board.filter((x) => x.canAttack && !x.frozen);
 +			if (playable.length === 0 && attackers.length === 0) return coachSay(petId, "这回合打不出牌也没法攻击，过。");
-+			const stateText = formatState(snap);
-+			const result = await generateCoachText(ctx, coachSystemPrompt(), stateText + "\n请给出这一步的最优操作。", configuredModel(found.conf, "whisperModel"));
-+			if (!result.ok) return coachFail(petId, result.reason, "算不了：" + (result.message || result.reason));
-+			const said = coachSay(petId, cleanCoachAdvice(result.text) || "这手我也没想好");
++			const advice = await coachComposeAdvice(found, snap, lookup, stateText);
++			if (advice === null) return coachFail(petId, "generate-error", "算不了");
++			const said = coachSay(petId, advice);
 +			return withDebug ? {
 +				...said,
 +				state: stateText
@@ -994,7 +1058,7 @@
  	/** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 把回复写进 S 的 pets.<id>.say。
  	*  供 POST /chat（动作端点）与 /chat 命令共用同一条路径（锁内读写，防两端交错写盘）。
  	*  配图（chatImageEnabled 开启时）：把表情包清单交给模型按语境选一张，命中池内才随回复写回。
-@@ -4957,6 +5815,42 @@
+@@ -4957,6 +5879,42 @@
  				};
  			}
  		}
@@ -1037,7 +1101,7 @@
  		if (rest === "whisper") {
  			if (method !== "POST") return {
  				kind: "json",
-@@ -5859,6 +6753,273 @@
+@@ -5859,6 +6817,273 @@
  			if (timer !== null) clearTimeout(timer);
  		};
  	}, "dsh-pet: whisper poll");
@@ -1239,8 +1303,8 @@
 +						say(petId, "这回合打不出牌也没法攻击，过。");
 +						return;
 +					}
-+					const r = await generateCoachText(ctx, coachSystemPrompt(), stateText + "\n现在轮到主人，请给出这一步的最优操作。", configuredModel(found.conf, "whisperModel"));
-+					if (r.ok) say(petId, cleanCoachAdvice(r.text) || "这手我也没想好");
++					const advice = await coachComposeAdvice(found, snap, coachLookup(), stateText);
++					if (advice) say(petId, advice);
 +				} else {
 +					const r = await generateCoachText(ctx, coachFoeSystemPrompt(), stateText + "\n现在是对手回合，用一句话解说或预测他要做什么。", configuredModel(found.conf, "whisperModel"));
 +					if (r.ok) say(petId, cleanCoachAdvice(r.text) || "看他这波想干嘛");
