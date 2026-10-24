@@ -43,6 +43,7 @@
 | `hsLogPath` | string | `""` | 可选：自定义 Power.log 文件/目录；留空自动探测 |
 | `hsCoachAutoTurn` | boolean | `true` | 轮到我方出牌阶段自动给建议（每回合一次） |
 | `hsCoachOpponentTalk` | boolean | `true` | 对手回合自动解说/预测（每回合一次） |
+| `hsCoachFlavor` | boolean | `true` | 分析后加戏：65% 概率 2 秒后随机播个动画；30% 概率 12 秒后补一句碎碎念 |
 
 设置页：设置 → 桌宠 →「炉石模式」卡片里有全部开关 + 快捷键/日志路径输入框（快捷键一般用不到，自动建议已经默认开）。
 
@@ -81,6 +82,16 @@ install.ps1 / install.sh         # 把 plugin/ 装回 DSH profile（含 runtime/
 | `lib/client.js` | 设置页「炉石模式」卡：三个开关 + 快捷键 + 日志路径；页面内快捷键兜底；中英文案 |
 | `assets/config.jsonc` | 新增 5 个默认值 + 注释 |
 | `runtime/coach-hotkey/main.cjs` | 新增：Electron 无窗口快捷键助手（globalShortcut → POST /coach） |
+
+## 分析后的加戏（hsCoachFlavor）
+
+每说完一句建议或解说：
+
+- **65%** 概率：2 秒后从桌宠动画池里随机播一个动作（不占气泡、不打断你操作）
+- **30%** 概率：12 秒后再来一句碎碎念（走原有碎碎念链路——炉石模式下就是炉石梗，会盖掉刚才的气泡）
+- 两件事独立，可能同时发生，也可能都不发生
+
+设置页「炉石模式」卡里的「分析后加戏」开关控制，关掉后教练只说话。
 
 ## 解析修复记录（2026-10-24）
 

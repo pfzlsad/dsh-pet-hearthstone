@@ -1573,6 +1573,7 @@ const GLOBAL_DEFAULT_KEYS = [
 	"hsLogPath",
 	"hsCoachAutoTurn",
 	"hsCoachOpponentTalk",
+	"hsCoachFlavor",
 	"chatMemoryRounds",
 	"whisperModel",
 	"chatModel",
@@ -1743,6 +1744,7 @@ function topFieldValid(key, value) {
 		case "chatImageEnabled": return typeof value === "boolean";
 		case "hearthstoneMode": return typeof value === "boolean";
 		case "hearthstoneAuto": return typeof value === "boolean";
+		case "hsCoachFlavor": return typeof value === "boolean";
 		case "hsCoachAutoTurn": return typeof value === "boolean";
 		case "hsCoachOpponentTalk": return typeof value === "boolean";
 		case "hsCoachEnabled": return typeof value === "boolean";
@@ -1997,6 +1999,8 @@ function saveUserConfig(raw, existing) {
 	if (hs !== void 0 && typeof hs !== "boolean") return null;
 	const hsa = o.hearthstoneAuto;
 	if (hsa !== void 0 && typeof hsa !== "boolean") return null;
+	const hcf = o.hsCoachFlavor;
+	if (hcf !== void 0 && typeof hcf !== "boolean") return null;
 	const hct = o.hsCoachAutoTurn;
 	if (hct !== void 0 && typeof hct !== "boolean") return null;
 	const hco = o.hsCoachOpponentTalk;
@@ -2033,6 +2037,7 @@ function saveUserConfig(raw, existing) {
 	if (hsa !== void 0) outConfig.hearthstoneAuto = hsa;
 	if (hce !== void 0) outConfig.hsCoachEnabled = hce;
 	if (hct !== void 0) outConfig.hsCoachAutoTurn = hct;
+	if (hcf !== void 0) outConfig.hsCoachFlavor = hcf;
 	if (hco !== void 0) outConfig.hsCoachOpponentTalk = hco;
 	if (hch !== void 0) outConfig.hsCoachHotkey = String(hch).trim();
 	if (hlp !== void 0) outConfig.hsLogPath = String(hlp);
@@ -2051,6 +2056,7 @@ function saveUserConfig(raw, existing) {
 	if (hsa !== void 0) bodyOwned.add("hearthstoneAuto");
 	if (hce !== void 0) bodyOwned.add("hsCoachEnabled");
 	if (hct !== void 0) bodyOwned.add("hsCoachAutoTurn");
+	if (hcf !== void 0) bodyOwned.add("hsCoachFlavor");
 	if (hco !== void 0) bodyOwned.add("hsCoachOpponentTalk");
 	if (hch !== void 0) bodyOwned.add("hsCoachHotkey");
 	if (hlp !== void 0) bodyOwned.add("hsLogPath");
@@ -4952,9 +4958,53 @@ function apply(ctx) {
 	};
 
 	let coachHotkeyState = { combo: "", registered: false, error: "" };
+
+	/** 分析之后的小动作：随机播一个动画（不占用气泡） */
+	const playRandomEmote = (petId) => {
+		try {
+			const cfg2 = readAllConfig(configPaths);
+			const found2 = findPetInstance(cfg2, petId);
+			if (!found2) return;
+			const names = animationNames(found2.conf.animations).filter((n) => typeof n === "string" && n);
+			if (names.length === 0) return;
+			const name = names[Math.floor(Math.random() * names.length)];
+			const record = playback.create(petId, name);
+			state.writePet(petId, "anim", {
+				name,
+				playbackId: record.playbackId
+			});
+		} catch (e) {
+			console.warn("[dsh-pet] 教练小动作失败：" + (e instanceof Error ? e.message : String(e)));
+		}
+	};
+	let coachFlavorSeq = 0;
+	let coachFlavorTimers = [];
+	/** 每次播完建议/解说后调用：按概率穿插一个动作，或过一会儿补一句碎碎念 */
+	const scheduleCoachFlavor = (petId) => {
+		let cfg2;
+		try {
+			cfg2 = readAllConfig(configPaths);
+		} catch {
+			return;
+		}
+		if (cfg2.main?.hsCoachFlavor !== true) return;
+		for (const t of coachFlavorTimers) clearTimeout(t);
+		coachFlavorTimers = [];
+		const seq = ++coachFlavorSeq;
+		if (Math.random() < 0.65) coachFlavorTimers.push(setTimeout(() => {
+			if (seq !== coachFlavorSeq) return;
+			playRandomEmote(petId);
+		}, 2200));
+		if (Math.random() < 0.3) coachFlavorTimers.push(setTimeout(() => {
+			if (seq !== coachFlavorSeq) return;
+			publishWhisper(petId).catch(() => {});
+		}, 12000));
+	};
+
 	let coachLastAt = 0;
 	const coachSay = (petId, text) => {
 		state.writePet(petId, "say", { text });
+		scheduleCoachFlavor(petId);
 		return {
 			ok: true,
 			text
@@ -6977,6 +7027,7 @@ function apply(ctx) {
 		};
 		const say = (petId, text) => {
 			state.writePet(petId, "say", { text });
+			scheduleCoachFlavor(petId);
 		};
 		async function check() {
 			const cfg2 = readAllConfig(configPaths);

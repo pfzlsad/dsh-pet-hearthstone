@@ -2263,6 +2263,8 @@ const zh = {
 	hsCoachAutoToggleHint: "轮到我方、进入出牌阶段时自动给一句最优操作（每回合一次），不用按快捷键。快捷键仍然保留，随时可以手动再问一次。",
 	hsCoachFoeToggle: "对手回合解说",
 	hsCoachFoeToggleHint: "对手回合开始时用一句话预测他要做什么、或点出当前最大威胁（不给主人出牌建议）。每回合一次；觉得吵就关掉，只留我方回合的建议。",
+	hsCoachFlavorToggle: "分析后加戏",
+	hsCoachFlavorToggleHint: "说完建议/解说后，偶尔随机播一个桌宠动画（不挡气泡）；另有小概率隔十几秒补一句碎碎念（走原有碎碎念，炉石模式下就是炉石梗）。关掉后教练只说话不做动作。",
 	hsLogPathLabel: "Power.log 路径（可选）",
 	hsLogPathHint: "留空 = 自动探测炉石安装目录下的 Logs（含时间戳子目录，取最新的 Power.log）。换机器或自定义目录时才需要填。",
 	chatImageToggle: "对话配图",
@@ -2434,6 +2436,8 @@ const en = {
 	hsCoachAutoToggleHint: "At the start of your turn (main action phase) the coach sends one best-play line, once per turn, no hotkey needed. The hotkey still works for asking again.",
 	hsCoachFoeToggle: "Commentate the opponent turn",
 	hsCoachFoeToggleHint: "At the start of the opponent's turn, one line predicting their play or naming the biggest threat (never your play). Once per turn; turn it off if it gets chatty.",
+	hsCoachFlavorToggle: "Flavor after analysis",
+	hsCoachFlavorToggleHint: "After each coaching line the pet sometimes plays a random animation (no bubble), and now and then follows up with a whisper line (the normal whisper, so Hearthstone memes in Hearthstone mode). Turn it off to keep the coach silent and still.",
 	hsLogPathLabel: "Power.log path (optional)",
 	hsLogPathHint: "Leave empty to auto-detect the Hearthstone Logs directory (including timestamped subfolders, newest Power.log wins). Fill only for custom installs or another machine.",
 	chatImageToggle: "Chat images",
@@ -2896,6 +2900,7 @@ function makePetConfigSection(rt) {
 		const [coachHotkey, setCoachHotkey] = useState("Ctrl+Alt+H");
 		const [coachAutoTurn, setCoachAutoTurn] = useState(true);
 		const [coachFoeTalk, setCoachFoeTalk] = useState(true);
+		const [coachFlavor, setCoachFlavor] = useState(true);
 		const [coachLogPath, setCoachLogPath] = useState("");
 		const [chatImage, setChatImage] = useState(false);
 		const [confineScreen, setConfineScreen] = useState(false);
@@ -2937,6 +2942,7 @@ function makePetConfigSection(rt) {
 			if (typeof m.hsLogPath === "string") setCoachLogPath(m.hsLogPath);
 			if (typeof m.hsCoachAutoTurn === "boolean") setCoachAutoTurn(m.hsCoachAutoTurn);
 			if (typeof m.hsCoachOpponentTalk === "boolean") setCoachFoeTalk(m.hsCoachOpponentTalk);
+			if (typeof m.hsCoachFlavor === "boolean") setCoachFlavor(m.hsCoachFlavor);
 			if (typeof m.chatImageEnabled === "boolean") setChatImage(m.chatImageEnabled);
 			if (typeof m.confineToScreen === "boolean") setConfineScreen(m.confineToScreen);
 			if (m.physics && typeof m.physics === "object") setPhysics({
@@ -3115,6 +3121,7 @@ function makePetConfigSection(rt) {
 					hsLogPath: coachLogPath,
 					hsCoachAutoTurn: coachAutoTurn,
 					hsCoachOpponentTalk: coachFoeTalk,
+					hsCoachFlavor: coachFlavor,
 					chatImageEnabled: chatImage,
 					confineToScreen: confineScreen,
 					physics,
@@ -3452,7 +3459,8 @@ function makePetConfigSection(rt) {
 							toggleCell("hearthstoneAutoToggle", hearthstoneAuto, busy, setHearthstoneAuto),
 							toggleCell("hsCoachToggle", coachEnabled, busy, setCoachEnabled),
 							toggleCell("hsCoachAutoToggle", coachAutoTurn, busy, setCoachAutoTurn),
-							toggleCell("hsCoachFoeToggle", coachFoeTalk, busy, setCoachFoeTalk, true)
+							toggleCell("hsCoachFoeToggle", coachFoeTalk, busy, setCoachFoeTalk),
+							toggleCell("hsCoachFlavorToggle", coachFlavor, busy, setCoachFlavor, true)
 						]
 					}), h("div", {
 						className: "dsh-pet-cfg__grid2",

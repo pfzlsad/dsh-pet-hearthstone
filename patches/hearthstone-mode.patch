@@ -408,8 +408,7 @@
 +
 +function hasTag(ent, name) {
 +  return ent.tags[name] === 1 || ent.tags[name] === "1";
- }
--async function generateWhisper(ctx, system, meme, preferred) {
++}
 +
 +function minionView(ent, lookup) {
 +  const info = lookup(ent.cardId);
@@ -642,7 +641,8 @@
 +    for (const ent of entries) if (ent.isDirectory()) consider(join(root, ent.name, "Power.log"));
 +  }
 +  return best;
-+}
+ }
+-async function generateWhisper(ctx, system, meme, preferred) {
 +
 +/** 只读文件尾部 maxBytes 字节（一局日志通常 < 5MB，避免每次全局读几十 MB） */
 +function readFileTail(file, maxBytes) {
@@ -824,7 +824,7 @@
  //#region src/host/whisper-policy.ts
  function automaticWhisperSchedule(policy, petEnabled, configuredPeriodSec) {
  	if (!policy) return {
-@@ -804,6 +1566,13 @@
+@@ -804,6 +1566,14 @@
  	"whisperImageEnabled",
  	"chatImageEnabled",
  	"chatImageLimit",
@@ -835,15 +835,17 @@
 +	"hsLogPath",
 +	"hsCoachAutoTurn",
 +	"hsCoachOpponentTalk",
++	"hsCoachFlavor",
  	"chatMemoryRounds",
  	"whisperModel",
  	"chatModel",
-@@ -972,6 +1741,13 @@
+@@ -972,6 +1742,14 @@
  		case "notificationsEnabled": return typeof value === "boolean";
  		case "whisperImageEnabled": return typeof value === "boolean";
  		case "chatImageEnabled": return typeof value === "boolean";
 +		case "hearthstoneMode": return typeof value === "boolean";
 +		case "hearthstoneAuto": return typeof value === "boolean";
++		case "hsCoachFlavor": return typeof value === "boolean";
 +		case "hsCoachAutoTurn": return typeof value === "boolean";
 +		case "hsCoachOpponentTalk": return typeof value === "boolean";
 +		case "hsCoachEnabled": return typeof value === "boolean";
@@ -852,7 +854,7 @@
  		case "confineToScreen": return typeof value === "boolean";
  		case "animations": return animationsValid(value);
  		case "animationWeights": return weightsValid(value);
-@@ -1217,6 +1993,20 @@
+@@ -1217,6 +1995,22 @@
  	if (wie !== void 0 && typeof wie !== "boolean") return null;
  	const cie = o.chatImageEnabled;
  	if (cie !== void 0 && typeof cie !== "boolean") return null;
@@ -860,6 +862,8 @@
 +	if (hs !== void 0 && typeof hs !== "boolean") return null;
 +	const hsa = o.hearthstoneAuto;
 +	if (hsa !== void 0 && typeof hsa !== "boolean") return null;
++	const hcf = o.hsCoachFlavor;
++	if (hcf !== void 0 && typeof hcf !== "boolean") return null;
 +	const hct = o.hsCoachAutoTurn;
 +	if (hct !== void 0 && typeof hct !== "boolean") return null;
 +	const hco = o.hsCoachOpponentTalk;
@@ -873,7 +877,7 @@
  	const cts = o.confineToScreen;
  	if (cts !== void 0 && typeof cts !== "boolean") return null;
  	const ph = o.physics;
-@@ -1239,6 +2029,13 @@
+@@ -1239,6 +2033,14 @@
  	if (ne !== void 0) outConfig.notificationsEnabled = ne;
  	if (wie !== void 0) outConfig.whisperImageEnabled = wie;
  	if (cie !== void 0) outConfig.chatImageEnabled = cie;
@@ -881,13 +885,14 @@
 +	if (hsa !== void 0) outConfig.hearthstoneAuto = hsa;
 +	if (hce !== void 0) outConfig.hsCoachEnabled = hce;
 +	if (hct !== void 0) outConfig.hsCoachAutoTurn = hct;
++	if (hcf !== void 0) outConfig.hsCoachFlavor = hcf;
 +	if (hco !== void 0) outConfig.hsCoachOpponentTalk = hco;
 +	if (hch !== void 0) outConfig.hsCoachHotkey = String(hch).trim();
 +	if (hlp !== void 0) outConfig.hsLogPath = String(hlp);
  	if (cts !== void 0) outConfig.confineToScreen = cts;
  	if (ph !== void 0) outConfig.physics = ph;
  	if (fo !== void 0) outConfig.font = fo;
-@@ -1250,6 +2047,13 @@
+@@ -1250,6 +2052,14 @@
  	if (ne !== void 0) bodyOwned.add("notificationsEnabled");
  	if (wie !== void 0) bodyOwned.add("whisperImageEnabled");
  	if (cie !== void 0) bodyOwned.add("chatImageEnabled");
@@ -895,13 +900,14 @@
 +	if (hsa !== void 0) bodyOwned.add("hearthstoneAuto");
 +	if (hce !== void 0) bodyOwned.add("hsCoachEnabled");
 +	if (hct !== void 0) bodyOwned.add("hsCoachAutoTurn");
++	if (hcf !== void 0) bodyOwned.add("hsCoachFlavor");
 +	if (hco !== void 0) bodyOwned.add("hsCoachOpponentTalk");
 +	if (hch !== void 0) bodyOwned.add("hsCoachHotkey");
 +	if (hlp !== void 0) bodyOwned.add("hsLogPath");
  	if (cts !== void 0) bodyOwned.add("confineToScreen");
  	if (ph !== void 0) bodyOwned.add("physics");
  	if (fo !== void 0) bodyOwned.add("font");
-@@ -4005,6 +4809,10 @@
+@@ -4005,6 +4815,10 @@
  	};
  	let activePetId = "";
  	const lastWhisperAt = new Map();
@@ -912,7 +918,7 @@
  	const memoryPath = join(userRoot, "memory.json");
  	let chatQueue = Promise.resolve();
  	/** 读记忆文件：不存在 → 空；损坏 → 显式报错 + 备份原始文件（绝不静默丢数据）+ 重建空记忆 */
-@@ -4052,12 +4860,38 @@
+@@ -4052,12 +4866,38 @@
  		id: String(found.pet.id ?? ""),
  		now: new Date()
  	});
@@ -951,7 +957,7 @@
  	/** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
  	*  每只宠物独立生成（人设 = 它自己的 whisperPrompt，没写回落到所属条目）。生成成功就写进 S 的 pets.<id>.say——
  	*  碎碎念 / 命令气泡 / 对话回复在前端本来就是**同一条展示链路**（同一个 triggerWhisper、
-@@ -4075,9 +4909,10 @@
+@@ -4075,9 +4915,10 @@
  			reason: "unknown-pet",
  			message: "没有这只桌宠：" + petId
  		};
@@ -964,7 +970,7 @@
  		if (!result.ok) {
  			console.warn("[dsh-pet] 碎碎念生成失败 pet=" + petId + " reason=" + result.reason + (result.message ? " " + result.message : ""));
  			return result;
-@@ -4092,6 +4927,105 @@
+@@ -4092,6 +4933,149 @@
  			...result.image ? { image: result.image } : {}
  		};
  	};
@@ -993,9 +999,53 @@
 +	};
 +
 +	let coachHotkeyState = { combo: "", registered: false, error: "" };
++
++	/** 分析之后的小动作：随机播一个动画（不占用气泡） */
++	const playRandomEmote = (petId) => {
++		try {
++			const cfg2 = readAllConfig(configPaths);
++			const found2 = findPetInstance(cfg2, petId);
++			if (!found2) return;
++			const names = animationNames(found2.conf.animations).filter((n) => typeof n === "string" && n);
++			if (names.length === 0) return;
++			const name = names[Math.floor(Math.random() * names.length)];
++			const record = playback.create(petId, name);
++			state.writePet(petId, "anim", {
++				name,
++				playbackId: record.playbackId
++			});
++		} catch (e) {
++			console.warn("[dsh-pet] 教练小动作失败：" + (e instanceof Error ? e.message : String(e)));
++		}
++	};
++	let coachFlavorSeq = 0;
++	let coachFlavorTimers = [];
++	/** 每次播完建议/解说后调用：按概率穿插一个动作，或过一会儿补一句碎碎念 */
++	const scheduleCoachFlavor = (petId) => {
++		let cfg2;
++		try {
++			cfg2 = readAllConfig(configPaths);
++		} catch {
++			return;
++		}
++		if (cfg2.main?.hsCoachFlavor !== true) return;
++		for (const t of coachFlavorTimers) clearTimeout(t);
++		coachFlavorTimers = [];
++		const seq = ++coachFlavorSeq;
++		if (Math.random() < 0.65) coachFlavorTimers.push(setTimeout(() => {
++			if (seq !== coachFlavorSeq) return;
++			playRandomEmote(petId);
++		}, 2200));
++		if (Math.random() < 0.3) coachFlavorTimers.push(setTimeout(() => {
++			if (seq !== coachFlavorSeq) return;
++			publishWhisper(petId).catch(() => {});
++		}, 12000));
++	};
++
 +	let coachLastAt = 0;
 +	const coachSay = (petId, text) => {
 +		state.writePet(petId, "say", { text });
++		scheduleCoachFlavor(petId);
 +		return {
 +			ok: true,
 +			text
@@ -1070,7 +1120,7 @@
  	/** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 把回复写进 S 的 pets.<id>.say。
  	*  供 POST /chat（动作端点）与 /chat 命令共用同一条路径（锁内读写，防两端交错写盘）。
  	*  配图（chatImageEnabled 开启时）：把表情包清单交给模型按语境选一张，命中池内才随回复写回。
-@@ -4957,6 +5891,42 @@
+@@ -4957,6 +5941,42 @@
  				};
  			}
  		}
@@ -1113,7 +1163,7 @@
  		if (rest === "whisper") {
  			if (method !== "POST") return {
  				kind: "json",
-@@ -5859,6 +6829,273 @@
+@@ -5859,6 +6879,274 @@
  			if (timer !== null) clearTimeout(timer);
  		};
  	}, "dsh-pet: whisper poll");
@@ -1265,6 +1315,7 @@
 +		};
 +		const say = (petId, text) => {
 +			state.writePet(petId, "say", { text });
++			scheduleCoachFlavor(petId);
 +		};
 +		async function check() {
 +			const cfg2 = readAllConfig(configPaths);
@@ -1389,7 +1440,7 @@
  		description: "选择桌宠（/chat 对话的目标；支持选择框或手输 id/名字）",
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -2246,6 +2246,25 @@
+@@ -2246,6 +2246,27 @@
  	notifyToggleHint: "对话完成 / 生成失败 / 权限申请 / 用户选择，在窗口失焦时弹出系统级通知（桌面右下角）。",
  	whisperImageToggle: "碎碎念配图",
  	whisperImageToggleHint: "碎碎念时从表情包池随机抽一张，连同那句话一起显示（图片映射在配置文件顶层 memes）。token：碎碎念本来就每次生成都要调一次模型，配图只是把抽中那张的名称+描述（约 100 字符 / ≈60 token）加进同一次请求，增量可忽略。",
@@ -1410,12 +1461,14 @@
 +	hsCoachAutoToggleHint: "轮到我方、进入出牌阶段时自动给一句最优操作（每回合一次），不用按快捷键。快捷键仍然保留，随时可以手动再问一次。",
 +	hsCoachFoeToggle: "对手回合解说",
 +	hsCoachFoeToggleHint: "对手回合开始时用一句话预测他要做什么、或点出当前最大威胁（不给主人出牌建议）。每回合一次；觉得吵就关掉，只留我方回合的建议。",
++	hsCoachFlavorToggle: "分析后加戏",
++	hsCoachFlavorToggleHint: "说完建议/解说后，偶尔随机播一个桌宠动画（不挡气泡）；另有小概率隔十几秒补一句碎碎念（走原有碎碎念，炉石模式下就是炉石梗）。关掉后教练只说话不做动作。",
 +	hsLogPathLabel: "Power.log 路径（可选）",
 +	hsLogPathHint: "留空 = 自动探测炉石安装目录下的 Logs（含时间戳子目录，取最新的 Power.log）。换机器或自定义目录时才需要填。",
  	chatImageToggle: "对话配图",
  	chatImageToggleHint: "对话时由 AI 按当前语境从表情包池挑一张配图（可不挑；图片映射在配置文件顶层 memes）。token：每条消息都要把整张清单附进请求，当前约 1.1k 字符（≈650 token，约碎碎念配图的 11 倍），并随图片数量线性增长；关掉则一个字符都不附。",
  	confineToggle: "锁定在当前屏幕",
-@@ -2398,6 +2417,25 @@
+@@ -2398,6 +2419,27 @@
  	notifyToggleHint: "OS-level toasts (bottom-right of the desktop) for conversation completion, failures, permission requests, and questions — only while this window is unfocused.",
  	whisperImageToggle: "Whisper images",
  	whisperImageToggleHint: "Attach one random meme from the pool to each whisper line (image mapping lives in the top-level `memes` config field). Tokens: a whisper already calls the model every cycle, so the image only appends the name + description of that one meme (~100 chars / ~60 tokens) to the same request — negligible.",
@@ -1436,12 +1489,14 @@
 +	hsCoachAutoToggleHint: "At the start of your turn (main action phase) the coach sends one best-play line, once per turn, no hotkey needed. The hotkey still works for asking again.",
 +	hsCoachFoeToggle: "Commentate the opponent turn",
 +	hsCoachFoeToggleHint: "At the start of the opponent's turn, one line predicting their play or naming the biggest threat (never your play). Once per turn; turn it off if it gets chatty.",
++	hsCoachFlavorToggle: "Flavor after analysis",
++	hsCoachFlavorToggleHint: "After each coaching line the pet sometimes plays a random animation (no bubble), and now and then follows up with a whisper line (the normal whisper, so Hearthstone memes in Hearthstone mode). Turn it off to keep the coach silent and still.",
 +	hsLogPathLabel: "Power.log path (optional)",
 +	hsLogPathHint: "Leave empty to auto-detect the Hearthstone Logs directory (including timestamped subfolders, newest Power.log wins). Fill only for custom installs or another machine.",
  	chatImageToggle: "Chat images",
  	chatImageToggleHint: "Let the AI pick one meme from the pool that fits the current context (optional; mapping lives in the top-level `memes` config field). Tokens: every message carries the whole catalog — currently ~1.1k chars (~650 tokens, about 11x the whisper case) and growing with the number of images; turning this off appends nothing at all.",
  	confineToggle: "Lock to the current screen",
-@@ -2852,6 +2890,13 @@
+@@ -2852,6 +2894,14 @@
  		}, []);
  		const [notifyEnabled$1, setNotifyEnabled] = useState(true);
  		const [whisperImage, setWhisperImage] = useState(false);
@@ -1451,11 +1506,12 @@
 +		const [coachHotkey, setCoachHotkey] = useState("Ctrl+Alt+H");
 +		const [coachAutoTurn, setCoachAutoTurn] = useState(true);
 +		const [coachFoeTalk, setCoachFoeTalk] = useState(true);
++		const [coachFlavor, setCoachFlavor] = useState(true);
 +		const [coachLogPath, setCoachLogPath] = useState("");
  		const [chatImage, setChatImage] = useState(false);
  		const [confineScreen, setConfineScreen] = useState(false);
  		const [physics, setPhysics] = useState({ ...DEFAULT_PHYSICS });
-@@ -2885,6 +2930,13 @@
+@@ -2885,6 +2935,14 @@
  			setSelId((id) => loadedPets.some((p) => p.id === id) ? id : loadedPets[0]?.id ?? "");
  			if (typeof m.notificationsEnabled === "boolean") setNotifyEnabled(m.notificationsEnabled);
  			if (typeof m.whisperImageEnabled === "boolean") setWhisperImage(m.whisperImageEnabled);
@@ -1466,10 +1522,11 @@
 +			if (typeof m.hsLogPath === "string") setCoachLogPath(m.hsLogPath);
 +			if (typeof m.hsCoachAutoTurn === "boolean") setCoachAutoTurn(m.hsCoachAutoTurn);
 +			if (typeof m.hsCoachOpponentTalk === "boolean") setCoachFoeTalk(m.hsCoachOpponentTalk);
++			if (typeof m.hsCoachFlavor === "boolean") setCoachFlavor(m.hsCoachFlavor);
  			if (typeof m.chatImageEnabled === "boolean") setChatImage(m.chatImageEnabled);
  			if (typeof m.confineToScreen === "boolean") setConfineScreen(m.confineToScreen);
  			if (m.physics && typeof m.physics === "object") setPhysics({
-@@ -3026,6 +3078,13 @@
+@@ -3026,6 +3084,13 @@
  				});
  				return false;
  			}
@@ -1483,7 +1540,7 @@
  			if (!FONT_PRESETS.some((p) => p.id === font.family) || !Number.isFinite(font.size) || font.size < FONT_SIZE_MIN || font.size > FONT_SIZE_MAX) {
  				setMsg({
  					kind: "err",
-@@ -3049,6 +3108,13 @@
+@@ -3049,6 +3114,14 @@
  					pets,
  					notificationsEnabled: notifyEnabled$1,
  					whisperImageEnabled: whisperImage,
@@ -1494,10 +1551,11 @@
 +					hsLogPath: coachLogPath,
 +					hsCoachAutoTurn: coachAutoTurn,
 +					hsCoachOpponentTalk: coachFoeTalk,
++					hsCoachFlavor: coachFlavor,
  					chatImageEnabled: chatImage,
  					confineToScreen: confineScreen,
  					physics,
-@@ -3379,6 +3445,40 @@
+@@ -3379,6 +3452,41 @@
  				}),
  				h("div", {
  					className: "dsh-pet-cfg__card",
@@ -1508,7 +1566,8 @@
 +							toggleCell("hearthstoneAutoToggle", hearthstoneAuto, busy, setHearthstoneAuto),
 +							toggleCell("hsCoachToggle", coachEnabled, busy, setCoachEnabled),
 +							toggleCell("hsCoachAutoToggle", coachAutoTurn, busy, setCoachAutoTurn),
-+							toggleCell("hsCoachFoeToggle", coachFoeTalk, busy, setCoachFoeTalk, true)
++							toggleCell("hsCoachFoeToggle", coachFoeTalk, busy, setCoachFoeTalk),
++							toggleCell("hsCoachFlavorToggle", coachFlavor, busy, setCoachFlavor, true)
 +						]
 +					}), h("div", {
 +						className: "dsh-pet-cfg__grid2",
@@ -1538,7 +1597,7 @@
  					children: [
  						cardHead(t("fontTitle"), t("fontHint")),
  						h("div", {
-@@ -5714,7 +5814,43 @@
+@@ -5714,7 +5822,43 @@
  			"remote.commands",
  			"commandUi"
  		];
@@ -1584,7 +1643,7 @@
  				en
 --- a/assets/config.jsonc
 +++ b/assets/config.jsonc
-@@ -40,6 +40,41 @@
+@@ -40,6 +40,46 @@
    // 右键菜单「对话」与桌宠聊天时用哪个服务商 + 模型。填了但调用失败（凭据被删 / 模型下架 /
    // 该服务商没配 key）会**自动回落到当前对话的模型重试一次**，仍失败才按生成失败报错。
    "chatModel": { "provider": "", "model": "" },
@@ -1623,6 +1682,11 @@
 +  // 开启后，对手回合开始时用一句话预测他要做什么 / 点评当前最大威胁（不给主人出牌建议）。
 +  // 同样每个「回合 × 对手」只播一次。觉得吵可以关掉，只保留我方回合的建议。
 +  "hsCoachOpponentTalk": true,
++  // ===================== 炉石教练：分析后穿插小动作 / 碎碎念（全局默认） =====================
++  // 每次说完建议或解说后：65% 概率 2 秒后随机播一个桌宠动画（不占气泡）；
++  // 另有 30% 概率 12 秒后自动来一句碎碎念（走原有碎碎念链路——炉石模式下就是炉石梗，会盖掉刚才的气泡）。
++  // 关掉后教练只说话、不做动作。
++  "hsCoachFlavor": true,
    // ===================== 表情包：碎碎念配图开关（全局默认，所有宠物共用；种类文件顶层可覆盖） =====================
    // 开启后，碎碎念每次生成时从 memes 图片池随机抽 1 张，连同那句话一起显示（气泡配图）。
    // 碎碎念本身是"随口一句"，没有上下文可选，所以按随机抽（与对话的 AI 选图策略不同）。
