@@ -1169,6 +1169,12 @@ function coachSystemPrompt() {
     "4. 不要解释理由、不要加引号或前缀、不要分段。";
 }
 
+/** 对手回合解说：只预测/点评，不给主人出牌建议 */
+function coachFoeSystemPrompt() {
+  return "你是《炉石传说》对局解说。只输出一句话（不超过 30 个字），根据对手的费用、场面和手牌数，预测他这一回合最可能做什么，或点出当前最大的威胁。\n" +
+    "不要给主人出牌建议，不要用「你应该」，不要解释、不要引号、不要分段。";
+}
+
 /** 把模型输出压成干净的一行 */
 function cleanCoachAdvice(text) {
   return String(text || "")
@@ -1518,6 +1524,8 @@ const GLOBAL_DEFAULT_KEYS = [
 	"hsCoachEnabled",
 	"hsCoachHotkey",
 	"hsLogPath",
+	"hsCoachAutoTurn",
+	"hsCoachOpponentTalk",
 	"chatMemoryRounds",
 	"whisperModel",
 	"chatModel",
@@ -1688,6 +1696,8 @@ function topFieldValid(key, value) {
 		case "chatImageEnabled": return typeof value === "boolean";
 		case "hearthstoneMode": return typeof value === "boolean";
 		case "hearthstoneAuto": return typeof value === "boolean";
+		case "hsCoachAutoTurn": return typeof value === "boolean";
+		case "hsCoachOpponentTalk": return typeof value === "boolean";
 		case "hsCoachEnabled": return typeof value === "boolean";
 		case "hsCoachHotkey": return typeof value === "string" && value.trim().length > 0 && value.length <= 40;
 		case "hsLogPath": return typeof value === "string";
@@ -1940,6 +1950,10 @@ function saveUserConfig(raw, existing) {
 	if (hs !== void 0 && typeof hs !== "boolean") return null;
 	const hsa = o.hearthstoneAuto;
 	if (hsa !== void 0 && typeof hsa !== "boolean") return null;
+	const hct = o.hsCoachAutoTurn;
+	if (hct !== void 0 && typeof hct !== "boolean") return null;
+	const hco = o.hsCoachOpponentTalk;
+	if (hco !== void 0 && typeof hco !== "boolean") return null;
 	const hce = o.hsCoachEnabled;
 	if (hce !== void 0 && typeof hce !== "boolean") return null;
 	const hch = o.hsCoachHotkey;
@@ -1971,6 +1985,8 @@ function saveUserConfig(raw, existing) {
 	if (hs !== void 0) outConfig.hearthstoneMode = hs;
 	if (hsa !== void 0) outConfig.hearthstoneAuto = hsa;
 	if (hce !== void 0) outConfig.hsCoachEnabled = hce;
+	if (hct !== void 0) outConfig.hsCoachAutoTurn = hct;
+	if (hco !== void 0) outConfig.hsCoachOpponentTalk = hco;
 	if (hch !== void 0) outConfig.hsCoachHotkey = String(hch).trim();
 	if (hlp !== void 0) outConfig.hsLogPath = String(hlp);
 	if (cts !== void 0) outConfig.confineToScreen = cts;
@@ -1987,6 +2003,8 @@ function saveUserConfig(raw, existing) {
 	if (hs !== void 0) bodyOwned.add("hearthstoneMode");
 	if (hsa !== void 0) bodyOwned.add("hearthstoneAuto");
 	if (hce !== void 0) bodyOwned.add("hsCoachEnabled");
+	if (hct !== void 0) bodyOwned.add("hsCoachAutoTurn");
+	if (hco !== void 0) bodyOwned.add("hsCoachOpponentTalk");
 	if (hch !== void 0) bodyOwned.add("hsCoachHotkey");
 	if (hlp !== void 0) bodyOwned.add("hsLogPath");
 	if (cts !== void 0) bodyOwned.add("confineToScreen");
@@ -4864,6 +4882,8 @@ function apply(ctx) {
 	};
 	/** ===== 炉石教练：读 Power.log → 还原场面 → 一句话建议 ===== */
 	let coachBusy = false;
+	let coachLookupCache = null;
+	const coachLookup = () => coachLookupCache || (coachLookupCache = loadHsCardDb(userRoot));
 	let coachHotkeyState = { combo: "", registered: false, error: "" };
 	let coachLastAt = 0;
 	const coachSay = (petId, text) => {
@@ -4907,7 +4927,7 @@ function apply(ctx) {
 			const log = findLatestPowerLog(String(cfg0.main?.hsLogPath || ""));
 			if (!log) return coachFail(petId, "no-log", "没找到 Power.log：确认炉石开着、日志目录正确");
 			const st = parsePowerLog(extractLatestGame(readFileTail(log.path, HS_COACH_LOG_TAIL_BYTES)));
-			const lookup = loadHsCardDb(userRoot);
+			const lookup = coachLookup();
 			const snap = buildSnapshot(st, lookup);
 			if (!snap.turn) return coachFail(petId, "no-game", "还没进对局呢");
 			if (snap.gameOver) return coachFail(petId, "game-over", "这局已经结束了");
@@ -6863,6 +6883,99 @@ function apply(ctx) {
 			stop();
 		};
 	}, "dsh-pet: coach hotkey");
+	/**
+	* 回合自动播报：每 2 秒看一眼最新日志（文件没更新就跳过）。
+	*  - 轮到我方、进入出牌阶段 → 自动给一句最优建议（hsCoachAutoTurn）
+	*  - 对手回合 → 一句预测/解说（hsCoachOpponentTalk）
+	* 每个「回合 × 阵营」只播一次；新对局自动重新计数。
+	*/
+	ctx.effect(() => {
+		let disposed = false;
+		let timer = null;
+		let lastKey = "";
+		let lastSig = "";
+		const arm = (ms) => {
+			if (disposed) return;
+			if (timer !== null) clearTimeout(timer);
+			timer = setTimeout(() => void tick(), ms);
+		};
+		const say = (petId, text) => {
+			state.writePet(petId, "say", { text });
+		};
+		async function check() {
+			const cfg2 = readAllConfig(configPaths);
+			if (cfg2.main?.hsCoachEnabled !== true) {
+				lastKey = "";
+				return;
+			}
+			const autoTurn = cfg2.main?.hsCoachAutoTurn !== false;
+			const foeTalk = cfg2.main?.hsCoachOpponentTalk !== false;
+			if (!autoTurn && !foeTalk) {
+				lastKey = "";
+				return;
+			}
+			const log = findLatestPowerLog(String(cfg2.main?.hsLogPath || ""));
+			if (!log) {
+				lastKey = "";
+				return;
+			}
+			const sig = log.path + "|" + log.size + "|" + log.mtime;
+			if (sig === lastSig) return;
+			lastSig = sig;
+			const st = parsePowerLog(extractLatestGame(readFileTail(log.path, HS_COACH_LOG_TAIL_BYTES)));
+			const snap = buildSnapshot(st, coachLookup());
+			if (snap.gameOver) {
+				lastKey = "";
+				return;
+			}
+			if (!snap.turn || snap.step !== "MAIN_ACTION") return;
+			const side = snap.myTurn ? "me" : "foe";
+			const key = snap.turn + "|" + side;
+			if (key === lastKey) return;
+			if (!(snap.myTurn ? autoTurn : foeTalk)) {
+				lastKey = key;
+				return;
+			}
+			if (coachBusy) return;
+			const petId = String(resolveActivePetId() || "main");
+			const found = findPetInstance(cfg2, petId);
+			if (!found) return;
+			lastKey = key;
+			coachBusy = true;
+			try {
+				const stateText = formatState(snap);
+				if (snap.myTurn) {
+					const playable = snap.me.hand.filter((c) => c.cost <= snap.me.mana.max - snap.me.mana.used);
+					const attackers = snap.me.board.filter((x) => x.canAttack && !x.frozen);
+					if (playable.length === 0 && attackers.length === 0) {
+						say(petId, "这回合打不出牌也没法攻击，过。");
+						return;
+					}
+					const r = await generateCoachText(ctx, coachSystemPrompt(), stateText + "\n现在轮到主人，请给出这一步的最优操作。", configuredModel(found.conf, "whisperModel"));
+					if (r.ok) say(petId, cleanCoachAdvice(r.text) || "这手我也没想好");
+				} else {
+					const r = await generateCoachText(ctx, coachFoeSystemPrompt(), stateText + "\n现在是对手回合，用一句话解说或预测他要做什么。", configuredModel(found.conf, "whisperModel"));
+					if (r.ok) say(petId, cleanCoachAdvice(r.text) || "看他这波想干嘛");
+				}
+			} finally {
+				coachBusy = false;
+			}
+		}
+		async function tick() {
+			try {
+				await check();
+			} catch (e) {
+				console.warn("[dsh-pet] 教练自动播报出错：" + (e instanceof Error ? e.message : String(e)));
+			}
+			arm(2e3);
+		}
+		tick();
+		return () => {
+			disposed = true;
+			if (timer !== null) clearTimeout(timer);
+		};
+	}, "dsh-pet: coach auto turn");
+
 
 	/**
 	* 炉石自动检测：hearthstoneAuto 开着时每 8s 扫一次进程，开游戏 → 炉石模式开，

@@ -2259,6 +2259,10 @@ const zh = {
 	hsCoachHotkeyLabel: "教练快捷键",
 	hsCoachHotkeyHint: "Electron 全局快捷键写法（Ctrl / Alt / Shift + 字母数字），默认 Ctrl+Alt+H。改完要重启 DSH 才会重新注册；游戏全屏时也能按。",
 	hsCoachHotkeyRequired: "快捷键不能为空。",
+	hsCoachAutoToggle: "回合自动建议",
+	hsCoachAutoToggleHint: "轮到我方、进入出牌阶段时自动给一句最优操作（每回合一次），不用按快捷键。快捷键仍然保留，随时可以手动再问一次。",
+	hsCoachFoeToggle: "对手回合解说",
+	hsCoachFoeToggleHint: "对手回合开始时用一句话预测他要做什么、或点出当前最大威胁（不给主人出牌建议）。每回合一次；觉得吵就关掉，只留我方回合的建议。",
 	hsLogPathLabel: "Power.log 路径（可选）",
 	hsLogPathHint: "留空 = 自动探测炉石安装目录下的 Logs（含时间戳子目录，取最新的 Power.log）。换机器或自定义目录时才需要填。",
 	chatImageToggle: "对话配图",
@@ -2426,6 +2430,10 @@ const en = {
 	hsCoachHotkeyLabel: "Coach hotkey",
 	hsCoachHotkeyHint: "Electron accelerator syntax (Ctrl / Alt / Shift + key), default Ctrl+Alt+H. Re-registering needs a DSH restart; works while the game is fullscreen.",
 	hsCoachHotkeyRequired: "The hotkey cannot be empty.",
+	hsCoachAutoToggle: "Advise every turn",
+	hsCoachAutoToggleHint: "At the start of your turn (main action phase) the coach sends one best-play line, once per turn, no hotkey needed. The hotkey still works for asking again.",
+	hsCoachFoeToggle: "Commentate the opponent turn",
+	hsCoachFoeToggleHint: "At the start of the opponent's turn, one line predicting their play or naming the biggest threat (never your play). Once per turn; turn it off if it gets chatty.",
 	hsLogPathLabel: "Power.log path (optional)",
 	hsLogPathHint: "Leave empty to auto-detect the Hearthstone Logs directory (including timestamped subfolders, newest Power.log wins). Fill only for custom installs or another machine.",
 	chatImageToggle: "Chat images",
@@ -2886,6 +2894,8 @@ function makePetConfigSection(rt) {
 		const [hearthstoneAuto, setHearthstoneAuto] = useState(false);
 		const [coachEnabled, setCoachEnabled] = useState(false);
 		const [coachHotkey, setCoachHotkey] = useState("Ctrl+Alt+H");
+		const [coachAutoTurn, setCoachAutoTurn] = useState(true);
+		const [coachFoeTalk, setCoachFoeTalk] = useState(true);
 		const [coachLogPath, setCoachLogPath] = useState("");
 		const [chatImage, setChatImage] = useState(false);
 		const [confineScreen, setConfineScreen] = useState(false);
@@ -2925,6 +2935,8 @@ function makePetConfigSection(rt) {
 			if (typeof m.hsCoachEnabled === "boolean") setCoachEnabled(m.hsCoachEnabled);
 			if (typeof m.hsCoachHotkey === "string" && m.hsCoachHotkey.trim()) setCoachHotkey(m.hsCoachHotkey);
 			if (typeof m.hsLogPath === "string") setCoachLogPath(m.hsLogPath);
+			if (typeof m.hsCoachAutoTurn === "boolean") setCoachAutoTurn(m.hsCoachAutoTurn);
+			if (typeof m.hsCoachOpponentTalk === "boolean") setCoachFoeTalk(m.hsCoachOpponentTalk);
 			if (typeof m.chatImageEnabled === "boolean") setChatImage(m.chatImageEnabled);
 			if (typeof m.confineToScreen === "boolean") setConfineScreen(m.confineToScreen);
 			if (m.physics && typeof m.physics === "object") setPhysics({
@@ -3101,6 +3113,8 @@ function makePetConfigSection(rt) {
 					hsCoachEnabled: coachEnabled,
 					hsCoachHotkey: coachHotkey,
 					hsLogPath: coachLogPath,
+					hsCoachAutoTurn: coachAutoTurn,
+					hsCoachOpponentTalk: coachFoeTalk,
 					chatImageEnabled: chatImage,
 					confineToScreen: confineScreen,
 					physics,
@@ -3436,7 +3450,9 @@ function makePetConfigSection(rt) {
 						children: [
 							toggleCell("hearthstoneToggle", hearthstone, busy, setHearthstone),
 							toggleCell("hearthstoneAutoToggle", hearthstoneAuto, busy, setHearthstoneAuto),
-							toggleCell("hsCoachToggle", coachEnabled, busy, setCoachEnabled, true)
+							toggleCell("hsCoachToggle", coachEnabled, busy, setCoachEnabled),
+							toggleCell("hsCoachAutoToggle", coachAutoTurn, busy, setCoachAutoTurn),
+							toggleCell("hsCoachFoeToggle", coachFoeTalk, busy, setCoachFoeTalk, true)
 						]
 					}), h("div", {
 						className: "dsh-pet-cfg__grid2",
