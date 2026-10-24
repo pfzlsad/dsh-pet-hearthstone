@@ -502,7 +502,8 @@ function userTextWithMeme(meme, hearthstone = false) {
 	return head + "\n这次会配一张表情包一起显示，图的内容是：" + meme.name + "（" + meme.desc + "）。\n请让这句话和这张图的情绪/场景自然契合，像是配合画面说出来的；不要描述画面本身。" + (hearthstone ? "梗还是要炉石的。" : "");
 }
 /** 炉石模式（顶层 hearthstoneMode）：碎碎念的「语料」换成炉石相关梗。
-*  语料来源 = 用户提供的《炉石梗收集》，原句照抄，可整句引用也可改写成同风格的新梗。
+*  这里是**内置默认语料**（用户提供的《炉石梗收集》），用户在设置页 / 配置顶层
+*  `hearthstoneLines` 里写了自己的就整份替换（见 hearthstoneLinesOf）。
 *  只影响**碎碎念**（周期自动 + 右键菜单手动 + pet 命令留空），对话人设不受影响。 */
 const HEARTHSTONE_LINES = [
 	"人一定要有梦想！",
@@ -523,11 +524,26 @@ const HEARTHSTONE_LINES = [
 	"DJWCB",
 	"不是提了吗"
 ];
+/** 教练「分析后加戏」的默认概率（%）：配置缺失时兜底，/config/meta 也用它给设置页做默认值 */
+const COACH_EMOTE_CHANCE = 65;
+const COACH_WHISPER_CHANCE = 30;
 /** 炉石模式的碎碎念指令（替代 USER_TEXT）：说一句炉石味儿的一句话 */
 const HEARTHSTONE_USER_TEXT = "随便来一句炉石梗碎碎念，一句就好，20 字以内。可以是上面的原句、也可以自己造同风格的。";
-/** 炉石模式的人设正文（替代 whisperPrompt）：语言风格 + 语料一起给模型 */
-function hearthstonePersona() {
-	return "你是一只满嘴炉石梗的桌宠，主人是炉石传说老玩家。你要说一句 20 字以内的碎碎念，开口就是炉石味儿：卡牌台词、主播名场面、天梯/竞技场吐槽、酒馆战棋黑话都行，语气欠揍又好笑，像直播间弹幕。不要解释梗，不要提你是AI，不要描述画面。\n你可以整句引用下面这些梗，也可以自己造同风格的新梗：\n" + HEARTHSTONE_LINES.map((line) => "· " + line).join("\n");
+/** 某只宠物最终生效的炉石语料：条目顶层 `hearthstoneLines`（用户层/种类文件）优先，
+*  没有或整份非法（空数组 / 全是空行）→ 回落内置默认。合并器已保证元素是字符串，
+*  这里再兜一层空行过滤，免得手改文件留下空条目把提示词顶出个「· 」空行。 */
+function hearthstoneLinesOf(conf) {
+	const own = conf?.hearthstoneLines;
+	if (Array.isArray(own)) {
+		const lines = own.map((line) => String(line).trim()).filter((line) => line.length > 0);
+		if (lines.length > 0) return lines;
+	}
+	return HEARTHSTONE_LINES;
+}
+/** 炉石模式的人设正文（替代 whisperPrompt）：语言风格 + 语料一起给模型。
+*  lines 由调用方按宠物条目解析（hearthstoneLinesOf），缺省用内置那份。 */
+function hearthstonePersona(lines = HEARTHSTONE_LINES) {
+	return "你是一只满嘴炉石梗的桌宠，主人是炉石传说老玩家。你要说一句 20 字以内的碎碎念，开口就是炉石味儿：卡牌台词、主播名场面、天梯/竞技场吐槽、酒馆战棋黑话都行，语气欠揍又好笑，像直播间弹幕。不要解释梗，不要提你是AI，不要描述画面。\n你可以整句引用下面这些梗，也可以自己造同风格的新梗：\n" + lines.map((line) => "· " + line).join("\n");
 }
 /** 炉石进程名匹配（客户端进程就叫 Hearthstone.exe；Beta / 多开变体也一起算） */
 const HEARTHSTONE_PROCESS = /hearthstone/i;
@@ -1574,6 +1590,9 @@ const GLOBAL_DEFAULT_KEYS = [
 	"hsCoachAutoTurn",
 	"hsCoachOpponentTalk",
 	"hsCoachFlavor",
+	"hsCoachEmoteChance",
+	"hsCoachWhisperChance",
+	"hearthstoneLines",
 	"chatMemoryRounds",
 	"whisperModel",
 	"chatModel",
@@ -1727,6 +1746,27 @@ function workStatusTextsValid(value) {
 	}
 	return true;
 }
+/** 百分比参数（0~100 的有限数字）：教练加戏这类「概率」字段统一用它校验 */
+function percentValid(value) {
+	const n = Number(value);
+	return Number.isFinite(n) && n >= 0 && n <= 100;
+}
+/** 读百分比字段：非法/缺失回落 fallback，并夹到 0~100（消费端兜底，正常路径合并器已校验） */
+function percentOr(value, fallback) {
+	const n = Number(value);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.min(100, Math.max(0, n));
+}
+/** 炉石碎碎念语料：非空字符串数组（1~200 条、每条 ≤ 120 字）。
+*  空数组 / 空行 / 超长都算**非法**——合并器按「非法取内置默认」处理，
+*  所以想恢复内置语料，删掉自定义那个字段比留个空数组更明确（保存接口也不收空数组）。 */
+function hearthstoneLinesValid(value) {
+	if (!Array.isArray(value) || value.length === 0 || value.length > 200) return false;
+	for (const line of value) {
+		if (typeof line !== "string" || line.trim() === "" || line.length > 120) return false;
+	}
+	return true;
+}
 /** 顶层标量字段的合法性（非法与缺失同处理：取默认值 + 告警） */
 function topFieldValid(key, value) {
 	switch (key) {
@@ -1745,6 +1785,9 @@ function topFieldValid(key, value) {
 		case "hearthstoneMode": return typeof value === "boolean";
 		case "hearthstoneAuto": return typeof value === "boolean";
 		case "hsCoachFlavor": return typeof value === "boolean";
+		case "hsCoachEmoteChance":
+		case "hsCoachWhisperChance": return percentValid(value);
+		case "hearthstoneLines": return hearthstoneLinesValid(value);
 		case "hsCoachAutoTurn": return typeof value === "boolean";
 		case "hsCoachOpponentTalk": return typeof value === "boolean";
 		case "hsCoachEnabled": return typeof value === "boolean";
@@ -2001,6 +2044,12 @@ function saveUserConfig(raw, existing) {
 	if (hsa !== void 0 && typeof hsa !== "boolean") return null;
 	const hcf = o.hsCoachFlavor;
 	if (hcf !== void 0 && typeof hcf !== "boolean") return null;
+	const hsec = o.hsCoachEmoteChance;
+	if (hsec !== void 0 && !topFieldValid("hsCoachEmoteChance", hsec)) return null;
+	const hswc = o.hsCoachWhisperChance;
+	if (hswc !== void 0 && !topFieldValid("hsCoachWhisperChance", hswc)) return null;
+	const hsl = o.hearthstoneLines;
+	if (hsl !== void 0 && !topFieldValid("hearthstoneLines", hsl)) return null;
 	const hct = o.hsCoachAutoTurn;
 	if (hct !== void 0 && typeof hct !== "boolean") return null;
 	const hco = o.hsCoachOpponentTalk;
@@ -2038,6 +2087,9 @@ function saveUserConfig(raw, existing) {
 	if (hce !== void 0) outConfig.hsCoachEnabled = hce;
 	if (hct !== void 0) outConfig.hsCoachAutoTurn = hct;
 	if (hcf !== void 0) outConfig.hsCoachFlavor = hcf;
+	if (hsec !== void 0) outConfig.hsCoachEmoteChance = Number(hsec);
+	if (hswc !== void 0) outConfig.hsCoachWhisperChance = Number(hswc);
+	if (hsl !== void 0) outConfig.hearthstoneLines = hsl.map((line) => String(line).trim());
 	if (hco !== void 0) outConfig.hsCoachOpponentTalk = hco;
 	if (hch !== void 0) outConfig.hsCoachHotkey = String(hch).trim();
 	if (hlp !== void 0) outConfig.hsLogPath = String(hlp);
@@ -2057,6 +2109,9 @@ function saveUserConfig(raw, existing) {
 	if (hce !== void 0) bodyOwned.add("hsCoachEnabled");
 	if (hct !== void 0) bodyOwned.add("hsCoachAutoTurn");
 	if (hcf !== void 0) bodyOwned.add("hsCoachFlavor");
+	if (hsec !== void 0) bodyOwned.add("hsCoachEmoteChance");
+	if (hswc !== void 0) bodyOwned.add("hsCoachWhisperChance");
+	if (hsl !== void 0) bodyOwned.add("hearthstoneLines");
 	if (hco !== void 0) bodyOwned.add("hsCoachOpponentTalk");
 	if (hch !== void 0) bodyOwned.add("hsCoachHotkey");
 	if (hlp !== void 0) bodyOwned.add("hsLogPath");
@@ -4869,7 +4924,7 @@ function apply(ctx) {
 	/** 炉石模式的碎碎念 system：人设正文换成炉石梗语料（顶层 hearthstoneMode 开关），
 	*  名字/时间背景仍用同一套拼装——与普通碎碎念唯一的差别就是人设正文。 */
 	const hearthstoneSystemPrompt = (found) => composeSystemPrompt({
-		prompt: hearthstonePersona(),
+		prompt: hearthstonePersona(hearthstoneLinesOf(found.conf)),
 		name: String(found.pet.name ?? ""),
 		id: String(found.pet.id ?? ""),
 		now: new Date()
@@ -4991,11 +5046,13 @@ function apply(ctx) {
 		for (const t of coachFlavorTimers) clearTimeout(t);
 		coachFlavorTimers = [];
 		const seq = ++coachFlavorSeq;
-		if (Math.random() < 0.65) coachFlavorTimers.push(setTimeout(() => {
+		const emotePct = percentOr(cfg2.main?.hsCoachEmoteChance, COACH_EMOTE_CHANCE);
+		const whisperPct = percentOr(cfg2.main?.hsCoachWhisperChance, COACH_WHISPER_CHANCE);
+		if (Math.random() * 100 < emotePct) coachFlavorTimers.push(setTimeout(() => {
 			if (seq !== coachFlavorSeq) return;
 			playRandomEmote(petId);
 		}, 2200));
-		if (Math.random() < 0.3) coachFlavorTimers.push(setTimeout(() => {
+		if (Math.random() * 100 < whisperPct) coachFlavorTimers.push(setTimeout(() => {
 			if (seq !== coachFlavorSeq) return;
 			publishWhisper(petId).catch(() => {});
 		}, 12000));
@@ -5565,6 +5622,11 @@ function apply(ctx) {
 				default: join(PACKAGE_ROOT, "assets", "config.jsonc"),
 				animations: thumbUserRoot,
 				memes: memesUserRoot,
+				hearthstoneLines: HEARTHSTONE_LINES,
+				coachFlavor: {
+					emoteChance: COACH_EMOTE_CHANCE,
+					whisperChance: COACH_WHISPER_CHANCE
+				},
 				storage: storageEntries({
 					userDataRoot: userRoot,
 					electronDir: electronLandingDir(),

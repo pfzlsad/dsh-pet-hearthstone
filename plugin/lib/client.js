@@ -2251,7 +2251,7 @@ const zh = {
 	hearthstoneAutoToggle: "随炉石自动切换",
 	hearthstoneAutoToggleHint: "开启后每 8 秒检测一次炉石客户端进程：游戏启动 → 自动开启炉石模式；游戏退出 → 自动关闭。自动开着时以进程检测为准（手动开关只在两次切换之间临时生效）。关掉自动后检测立即停止，炉石模式保留你最后一次的设置。",
 	hearthstoneTitle: "炉石模式",
-	hearthstoneHint: "把碎碎念的语料换成炉石梗（语料见 lib/index.js 的 HEARTHSTONE_LINES），支持手动开关，也可以跟着游戏进程自动切换。全局生效，保存后写进用户配置。",
+	hearthstoneHint: "把碎碎念的语料换成炉石梗，支持手动开关，也可以跟着游戏进程自动切换。语料在下面直接改（一行一条，也能点「恢复内置」），全局生效，保存后写进用户配置。",
 	hsCoachTitle: "出牌教练",
 	hsCoachHint: "按快捷键读取最新的 Power.log，把当前场面交给模型，给一句 30 字以内的出牌建议（直接冒在桌宠气泡里）。只在按键那一刻计算，对手回合或对局结束会直接提示。只读日志，不读内存、不操作游戏，酒馆战棋不支持。",
 	hsCoachToggle: "出牌教练",
@@ -2264,7 +2264,17 @@ const zh = {
 	hsCoachFoeToggle: "对手回合解说",
 	hsCoachFoeToggleHint: "对手回合开始时用一句话预测他要做什么、或点出当前最大威胁（不给主人出牌建议）。每回合一次；觉得吵就关掉，只留我方回合的建议。",
 	hsCoachFlavorToggle: "分析后加戏",
-	hsCoachFlavorToggleHint: "说完建议/解说后，偶尔随机播一个桌宠动画（不挡气泡）；另有小概率隔十几秒补一句碎碎念（走原有碎碎念，炉石模式下就是炉石梗）。关掉后教练只说话不做动作。",
+	hsCoachFlavorToggleHint: "说完建议/解说后，偶尔随机播一个桌宠动画（不挡气泡）；另有小概率隔十几秒补一句碎碎念（走原有碎碎念，炉石模式下就是炉石梗）。关掉后教练只说话不做动作；开着的频率在下面两个概率里调。",
+	hsCoachEmoteChance: "加戏：动作概率（%）",
+	hsCoachEmoteChanceHint: "「分析后加戏」开着时，每次说完建议/解说，隔 2 秒随机播一个桌宠动画的概率：0 = 不播，65 = 默认，100 = 每次都播。",
+	hsCoachWhisperChance: "加戏：碎碎念概率（%）",
+	hsCoachWhisperChanceHint: "每次说完建议/解说，隔 12 秒补一句碎碎念的概率：0 = 不补，30 = 默认。碎碎念走原有链路——炉石模式下说的就是下面那份语料。",
+	invalidHsCoachChance: "两个加戏概率都要是 0~100 之间的数字。",
+	hsLinesLabel: "炉石碎碎念语料",
+	hsLinesHint: "一行一条。炉石模式下把这些原梗交给模型，并允许它自造同风格的新梗；空行会被忽略。上限 200 条、每条 120 字。改完点「保存」，下一次碎碎念即生效，对所有宠物通用。",
+	hsLinesCount: "{n} 条",
+	hsLinesReset: "恢复内置",
+	invalidHsLines: "语料至少要有 1 条，每条不超过 120 字（最多 200 条）。",
 	hsLogPathLabel: "Power.log 路径（可选）",
 	hsLogPathHint: "留空 = 自动探测炉石安装目录下的 Logs（含时间戳子目录，取最新的 Power.log）。换机器或自定义目录时才需要填。",
 	chatImageToggle: "对话配图",
@@ -2424,7 +2434,7 @@ const en = {
 	hearthstoneAutoToggle: "Follow the game",
 	hearthstoneAutoToggleHint: "Checks for the Hearthstone client every 8 seconds: game started → Hearthstone mode turns on; game closed → it turns off. While this is on, detection wins (the manual switch only holds between transitions). Turning it off stops detection and keeps your last setting.",
 	hearthstoneTitle: "Hearthstone mode",
-	hearthstoneHint: "Swaps the whisper corpus for Hearthstone memes (corpus: HEARTHSTONE_LINES in lib/index.js). Switch it manually, or let it follow the game process. Global; saved into the user config.",
+	hearthstoneHint: "Swaps the whisper corpus for Hearthstone memes. Switch it manually, or let it follow the game process. Edit the corpus below (one line each; \"Restore built-in\" puts the shipped list back). Global; saved into the user config.",
 	hsCoachTitle: "Play coach",
 	hsCoachHint: "On the hotkey, reads the newest Power.log, sends the board to the model and shows a one-line play suggestion in the pet bubble. Computed only on keypress; opponent turn or a finished game gets a short note. Log-only: no memory reads, no input automation. Constructed only.",
 	hsCoachToggle: "Play coach",
@@ -2437,7 +2447,17 @@ const en = {
 	hsCoachFoeToggle: "Commentate the opponent turn",
 	hsCoachFoeToggleHint: "At the start of the opponent's turn, one line predicting their play or naming the biggest threat (never your play). Once per turn; turn it off if it gets chatty.",
 	hsCoachFlavorToggle: "Flavor after analysis",
-	hsCoachFlavorToggleHint: "After each coaching line the pet sometimes plays a random animation (no bubble), and now and then follows up with a whisper line (the normal whisper, so Hearthstone memes in Hearthstone mode). Turn it off to keep the coach silent and still.",
+	hsCoachFlavorToggleHint: "After each coaching line the pet sometimes plays a random animation (no bubble), and now and then follows up with a whisper line (the normal whisper, so Hearthstone memes in Hearthstone mode). Turn it off to keep the coach silent and still; tune how often with the two chances below.",
+	hsCoachEmoteChance: "Flavor: animation chance (%)",
+	hsCoachEmoteChanceHint: "With \"Flavor after analysis\" on, the chance to play a random pet animation 2 seconds after each coaching line: 0 = never, 65 = default, 100 = every time.",
+	hsCoachWhisperChance: "Flavor: whisper chance (%)",
+	hsCoachWhisperChanceHint: "The chance to add one whisper line 12 seconds after each coaching line: 0 = never, 30 = default. The whisper uses the normal path — the corpus below in Hearthstone mode.",
+	invalidHsCoachChance: "Both flavor chances must be numbers between 0 and 100.",
+	hsLinesLabel: "Hearthstone whisper corpus",
+	hsLinesHint: "One line per entry. In Hearthstone mode the model may quote one of these as-is or coin a new line in the same style; blank lines are ignored. Up to 200 entries, 120 characters each. Save, and the next whisper uses it — shared by every pet.",
+	hsLinesCount: "{n} lines",
+	hsLinesReset: "Restore built-in",
+	invalidHsLines: "The corpus needs at least 1 entry, each no longer than 120 characters (at most 200 entries).",
 	hsLogPathLabel: "Power.log path (optional)",
 	hsLogPathHint: "Leave empty to auto-detect the Hearthstone Logs directory (including timestamped subfolders, newest Power.log wins). Fill only for custom installs or another machine.",
 	chatImageToggle: "Chat images",
@@ -2530,6 +2550,10 @@ function makePetConfigSection(rt) {
 	const inputClass = "dsh-pet-cfg__inp";
 	/** 等宽字体栈（路径与命令展示用；不引外部字体，走系统栈，避免多拉一份资源） */
 	const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, \"Courier New\", monospace";
+	/** 0~100 的百分比是否合法（加戏概率用） */
+	const percentOk = (v) => Number.isFinite(v) && v >= 0 && v <= 100;
+	/** 语料文本框 → 字符串数组：按行切、去首尾空白、丢空行 */
+	const parseHsLines = (text) => String(text ?? "").split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
 	/** 生成一个未占用的宠物 id（pet-2、pet-3…） */
 	const nextId = (list) => {
 		let n = 2;
@@ -2890,7 +2914,14 @@ function makePetConfigSection(rt) {
 		const [dialog, setDialog] = useState(null);
 		const [paths, setPaths] = useState(null);
 		useEffect(() => {
-			fetch("/dsh-pet-7340/config/meta").then((r) => r.ok ? r.json() : null).then((p) => setPaths(p)).catch(() => console.warn("[dsh-pet] 读取配置文件路径失败"));
+			fetch("/dsh-pet-7340/config/meta").then((r) => r.ok ? r.json() : null).then((p) => {
+				setPaths(p);
+				if (Array.isArray(p?.hearthstoneLines) && p.hearthstoneLines.length > 0) {
+					setHsBuiltin(p.hearthstoneLines);
+					// 宿主还是旧版（/config 不带 hearthstoneLines）时先用内置那份垫上，避免文本框空白、存不了
+					setHsLines((cur) => cur === "" ? p.hearthstoneLines.join("\n") : cur);
+				}
+			}).catch(() => console.warn("[dsh-pet] 读取配置文件路径失败"));
 		}, []);
 		const [notifyEnabled$1, setNotifyEnabled] = useState(true);
 		const [whisperImage, setWhisperImage] = useState(false);
@@ -2901,6 +2932,10 @@ function makePetConfigSection(rt) {
 		const [coachAutoTurn, setCoachAutoTurn] = useState(true);
 		const [coachFoeTalk, setCoachFoeTalk] = useState(true);
 		const [coachFlavor, setCoachFlavor] = useState(true);
+		const [coachEmoteChance, setCoachEmoteChance] = useState(65);
+		const [coachWhisperChance, setCoachWhisperChance] = useState(30);
+		const [hsLines, setHsLines] = useState("");
+		const [hsBuiltin, setHsBuiltin] = useState(null);
 		const [coachLogPath, setCoachLogPath] = useState("");
 		const [chatImage, setChatImage] = useState(false);
 		const [confineScreen, setConfineScreen] = useState(false);
@@ -2943,6 +2978,11 @@ function makePetConfigSection(rt) {
 			if (typeof m.hsCoachAutoTurn === "boolean") setCoachAutoTurn(m.hsCoachAutoTurn);
 			if (typeof m.hsCoachOpponentTalk === "boolean") setCoachFoeTalk(m.hsCoachOpponentTalk);
 			if (typeof m.hsCoachFlavor === "boolean") setCoachFlavor(m.hsCoachFlavor);
+			const emoteChance = Number(m.hsCoachEmoteChance);
+			if (m.hsCoachEmoteChance !== void 0 && Number.isFinite(emoteChance)) setCoachEmoteChance(emoteChance);
+			const whisperChance = Number(m.hsCoachWhisperChance);
+			if (m.hsCoachWhisperChance !== void 0 && Number.isFinite(whisperChance)) setCoachWhisperChance(whisperChance);
+			if (Array.isArray(m.hearthstoneLines)) setHsLines(m.hearthstoneLines.join("\n"));
 			if (typeof m.chatImageEnabled === "boolean") setChatImage(m.chatImageEnabled);
 			if (typeof m.confineToScreen === "boolean") setConfineScreen(m.confineToScreen);
 			if (m.physics && typeof m.physics === "object") setPhysics({
@@ -3091,6 +3131,13 @@ function makePetConfigSection(rt) {
 				});
 				return false;
 			}
+			if (!percentOk(coachEmoteChance) || !percentOk(coachWhisperChance)) {
+				setMsg({
+					kind: "err",
+					text: t("invalidHsCoachChance")
+				});
+				return false;
+			}
 			if (!FONT_PRESETS.some((p) => p.id === font.family) || !Number.isFinite(font.size) || font.size < FONT_SIZE_MIN || font.size > FONT_SIZE_MAX) {
 				setMsg({
 					kind: "err",
@@ -3104,6 +3151,14 @@ function makePetConfigSection(rt) {
 			if (busy) return;
 			const isOk = validated();
 			if (!isOk) return;
+			const hearthstoneLines = parseHsLines(hsLines);
+			if (hearthstoneLines.length === 0 || hearthstoneLines.length > 200 || hearthstoneLines.some((line) => line.length > 120)) {
+				setMsg({
+					kind: "err",
+					text: t("invalidHsLines")
+				});
+				return;
+			}
 			setBusy(true);
 			setMsg({
 				kind: "",
@@ -3122,6 +3177,9 @@ function makePetConfigSection(rt) {
 					hsCoachAutoTurn: coachAutoTurn,
 					hsCoachOpponentTalk: coachFoeTalk,
 					hsCoachFlavor: coachFlavor,
+					hsCoachEmoteChance: coachEmoteChance,
+					hsCoachWhisperChance: coachWhisperChance,
+					hearthstoneLines,
 					chatImageEnabled: chatImage,
 					confineToScreen: confineScreen,
 					physics,
@@ -3483,7 +3541,62 @@ function makePetConfigSection(rt) {
 								onChange: (e) => setCoachLogPath(e.target.value)
 							}), t("hsLogPathHint"), true)
 						]
-					})]
+					}), h("div", {
+						className: "dsh-pet-cfg__grid2",
+						children: [
+							field(t("hsCoachEmoteChance"), h("input", {
+								type: "number",
+								className: inputClass,
+								step: "5",
+								min: "0",
+								max: "100",
+								value: String(coachEmoteChance),
+								disabled: busy,
+								onChange: (e) => setCoachEmoteChance(Number(e.target.value))
+							}), t("hsCoachEmoteChanceHint")),
+							field(t("hsCoachWhisperChance"), h("input", {
+								type: "number",
+								className: inputClass,
+								step: "5",
+								min: "0",
+								max: "100",
+								value: String(coachWhisperChance),
+								disabled: busy,
+								onChange: (e) => setCoachWhisperChance(Number(e.target.value))
+							}), t("hsCoachWhisperChanceHint"), true)
+						]
+					}), field(t("hsLinesLabel"), h("div", {
+						className: "dsh-pet-cfg__persona",
+						children: [h("textarea", {
+							className: inputClass + " dsh-pet-cfg__area",
+							rows: 6,
+							value: hsLines,
+							disabled: busy,
+							placeholder: "一行一条，例如：叠甲，过。",
+							onChange: (e) => setHsLines(e.target.value)
+						}), h("div", {
+							style: {
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								gap: "8px"
+							},
+							children: [hsBuiltin ? h("button", {
+								key: "reset",
+								type: "button",
+								className: "dsh-pet-cfg__btn is-sm",
+								disabled: busy,
+								onClick: () => setHsLines(hsBuiltin.join("\n")),
+								children: t("hsLinesReset")
+							}) : h("span", {
+								key: "noreset"
+							}), h("span", {
+								key: "count",
+								className: "dsh-pet-cfg__count",
+								children: t("hsLinesCount").replace("{n}", String(parseHsLines(hsLines).length))
+							})]
+						})]
+					}), t("hsLinesHint"))]
 				}),
 				h("div", {
 					className: "dsh-pet-cfg__card",
