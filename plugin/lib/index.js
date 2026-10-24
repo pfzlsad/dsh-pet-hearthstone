@@ -685,6 +685,10 @@ function parseRef(ref) {
 }
 
 function noteReveal(st, ent) {
+  // 只统计「开局换牌阶段」的手牌揭示：本地玩家会亮 3~4 张，对手一张都不亮。
+  // 不能统计整局——对手每打出一张牌，日志里也会先给它挂上 cardId，计分会被带偏，
+  // 严重时会把对手当成本地玩家（费用/手牌全反）。
+  if (st.turn > 1) return;
   if (!ent || ent.zone !== "HAND" || !ent.cardId) return;
   if (ent.controller !== 1 && ent.controller !== 2) return;
   if (st.revealedHand.has(ent.id)) return;
@@ -961,7 +965,7 @@ function buildSnapshot(st, lookup) {
           cost: typeof e.tags.COST === "number" ? e.tags.COST : (info.cost ?? 0),
           text: info.text || ""
         };
-      }).filter((c) => c.cardId),
+      }),
       board: board.map((e) => minionView(e, lookup)),
       secrets: secrets.length,
       deckCount,
@@ -981,10 +985,11 @@ function buildSnapshot(st, lookup) {
     const target = p.target ? lookupTarget(st, p.target, lookup) : "";
     return `T${p.turn} ${who}打出 ${info.name || p.cardId}${target ? " → " + target : ""}`;
   });
+  const dead = (mine.hero.health !== null && mine.hero.health <= 0) || (theirs.hero.health !== null && theirs.hero.health <= 0);
   return {
     turn: st.turn,
     step: st.step,
-    gameOver: st.gameOver,
+    gameOver: st.gameOver || dead,
     myTurn: st.currentPlayer === me,
     me: mine,
     foe: theirs,
@@ -1009,9 +1014,11 @@ function formatState(snap) {
   const f = snap.foe;
   const lines = [];
   lines.push(`回合 ${snap.turn}，${snap.myTurn ? "轮到我方" : "当前是对手回合"}。`);
-  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}法力 ${m.mana.max - m.mana.used}/${m.mana.max}${m.mana.overloadLocked ? " 过载锁定" + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
-  lines.push(`我方手牌 ${m.hand.length} 张：` + (m.hand.map((c) => `${c.name}(${c.cost}费)${c.text ? "[" + c.text.slice(0, 40) + "]" : ""}`).join("；") || "无"));
-  const playable = m.hand.filter((c) => c.cost <= m.mana.max - m.mana.used);
+  const myAvail = m.mana.max - m.mana.used;
+  const myVisible = m.hand.filter((c) => c.cardId);
+  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}本回合可用 ${myAvail} 费（水晶上限 ${m.mana.max}，已用 ${m.mana.used}）${m.mana.overloadLocked ? " 过载锁定 " + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
+  lines.push(`我方手牌 ${m.hand.length} 张：` + (myVisible.map((c) => `${c.name}(${c.cost}费)${c.text ? "[" + c.text.slice(0, 40) + "]" : ""}`).join("；") || "无"));
+  const playable = myVisible.filter((c) => c.cost <= myAvail);
   lines.push(`本回合可用手牌（只能从这里面选）：` + (playable.map((c) => `${c.name}(${c.cost}费)`).join("；") || "一张都打不出"));
   lines.push(`我方场面 ${m.board.length} 个：` + (m.board.map(fmtMinion).join("；") || "空") + (m.weapon ? `；武器 ${m.weapon.name} ${m.weapon.atk}/${m.weapon.durability}` : ""));
   lines.push(`对手 ${f.hero.class || ""}英雄 ${f.hero.name}：${f.hero.health ?? "?"}血 ${f.hero.armor ? f.hero.armor + "甲 " : ""}手牌 ${f.hand.length} 张 牌库 ${f.deckCount}。`);
@@ -4995,7 +5002,11 @@ function apply(ctx) {
 				if (cfg0.main?.hsCoachOpponentTalk === false) return coachFail(petId, "not-my-turn", "等你回合再问");
 				const comment = await generateCoachText(ctx, coachFoeSystemPrompt(), stateText + "\n现在是对手回合，用一句话解说或预测他要做什么。", configuredModel(found.conf, "whisperModel"));
 				if (!comment.ok) return coachFail(petId, comment.reason, "算不了：" + (comment.message || comment.reason));
-				return coachSay(petId, cleanCoachAdvice(comment.text) || "看他这波想干嘛");
+				const said = coachSay(petId, cleanCoachAdvice(comment.text) || "看他这波想干嘛");
+				return withDebug ? {
+					...said,
+					state: stateText
+				} : said;
 			}
 			const playable = snap.me.hand.filter((c) => c.cost <= snap.me.mana.max - snap.me.mana.used);
 			const attackers = snap.me.board.filter((x) => x.canAttack && !x.frozen);

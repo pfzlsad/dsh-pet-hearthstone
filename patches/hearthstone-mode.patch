@@ -6,7 +6,7 @@
  import { mkdir, readFile, writeFile } from "node:fs/promises";
  import { homedir } from "node:os";
  import { dirname, join, normalize, resolve, sep } from "node:path";
-@@ -497,10 +497,735 @@
+@@ -497,10 +497,742 @@
  * 碎碎念指令：带表情包（用户开启 whisperImageEnabled 时）——要求模型配合作画说一句。
  * 明确「正文仍是一句话」：图是配图，不是让模型描述画面本身。
  */
@@ -200,6 +200,10 @@
 +}
 +
 +function noteReveal(st, ent) {
++  // 只统计「开局换牌阶段」的手牌揭示：本地玩家会亮 3~4 张，对手一张都不亮。
++  // 不能统计整局——对手每打出一张牌，日志里也会先给它挂上 cardId，计分会被带偏，
++  // 严重时会把对手当成本地玩家（费用/手牌全反）。
++  if (st.turn > 1) return;
 +  if (!ent || ent.zone !== "HAND" || !ent.cardId) return;
 +  if (ent.controller !== 1 && ent.controller !== 2) return;
 +  if (st.revealedHand.has(ent.id)) return;
@@ -477,7 +481,7 @@
 +          cost: typeof e.tags.COST === "number" ? e.tags.COST : (info.cost ?? 0),
 +          text: info.text || ""
 +        };
-+      }).filter((c) => c.cardId),
++      }),
 +      board: board.map((e) => minionView(e, lookup)),
 +      secrets: secrets.length,
 +      deckCount,
@@ -497,10 +501,11 @@
 +    const target = p.target ? lookupTarget(st, p.target, lookup) : "";
 +    return `T${p.turn} ${who}打出 ${info.name || p.cardId}${target ? " → " + target : ""}`;
 +  });
++  const dead = (mine.hero.health !== null && mine.hero.health <= 0) || (theirs.hero.health !== null && theirs.hero.health <= 0);
 +  return {
 +    turn: st.turn,
 +    step: st.step,
-+    gameOver: st.gameOver,
++    gameOver: st.gameOver || dead,
 +    myTurn: st.currentPlayer === me,
 +    me: mine,
 +    foe: theirs,
@@ -525,9 +530,11 @@
 +  const f = snap.foe;
 +  const lines = [];
 +  lines.push(`回合 ${snap.turn}，${snap.myTurn ? "轮到我方" : "当前是对手回合"}。`);
-+  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}法力 ${m.mana.max - m.mana.used}/${m.mana.max}${m.mana.overloadLocked ? " 过载锁定" + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
-+  lines.push(`我方手牌 ${m.hand.length} 张：` + (m.hand.map((c) => `${c.name}(${c.cost}费)${c.text ? "[" + c.text.slice(0, 40) + "]" : ""}`).join("；") || "无"));
-+  const playable = m.hand.filter((c) => c.cost <= m.mana.max - m.mana.used);
++  const myAvail = m.mana.max - m.mana.used;
++  const myVisible = m.hand.filter((c) => c.cardId);
++  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}本回合可用 ${myAvail} 费（水晶上限 ${m.mana.max}，已用 ${m.mana.used}）${m.mana.overloadLocked ? " 过载锁定 " + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
++  lines.push(`我方手牌 ${m.hand.length} 张：` + (myVisible.map((c) => `${c.name}(${c.cost}费)${c.text ? "[" + c.text.slice(0, 40) + "]" : ""}`).join("；") || "无"));
++  const playable = myVisible.filter((c) => c.cost <= myAvail);
 +  lines.push(`本回合可用手牌（只能从这里面选）：` + (playable.map((c) => `${c.name}(${c.cost}费)`).join("；") || "一张都打不出"));
 +  lines.push(`我方场面 ${m.board.length} 个：` + (m.board.map(fmtMinion).join("；") || "空") + (m.weapon ? `；武器 ${m.weapon.name} ${m.weapon.atk}/${m.weapon.durability}` : ""));
 +  lines.push(`对手 ${f.hero.class || ""}英雄 ${f.hero.name}：${f.hero.health ?? "?"}血 ${f.hero.armor ? f.hero.armor + "甲 " : ""}手牌 ${f.hand.length} 张 牌库 ${f.deckCount}。`);
@@ -745,7 +752,7 @@
  	const candidates = modelCandidates(ctx, preferred);
  	if (candidates.length === 0) return {
  		ok: false,
-@@ -519,7 +1244,7 @@
+@@ -519,7 +1251,7 @@
  		message: noTextReason(void 0)
  	};
  	for (const [i, sel] of candidates.entries()) {
@@ -754,7 +761,7 @@
  		if (result.ok) return result;
  		last = result;
  		if (i + 1 < candidates.length) console.warn(`dsh-pet: 碎碎念用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`);
-@@ -527,8 +1252,8 @@
+@@ -527,8 +1259,8 @@
  	return last;
  }
  /** 用**一个**确定的 provider/model 跑一次生成（候选链的一环；失败原样返回结构化原因，不吞） */
@@ -765,7 +772,7 @@
  	const supportsOff = await supportsReasoningOff(ctx, sel.provider, sel.model);
  	const options = {
  		provider: sel.provider,
-@@ -537,12 +1262,12 @@
+@@ -537,12 +1269,12 @@
  		messages: [createUserMessage({
  			content: [{
  				type: "text",
@@ -780,7 +787,7 @@
  		...supportsOff ? { reasoningEffort: ReasoningEffortId("off") } : {},
  		signal: deadline
  	};
-@@ -573,6 +1298,35 @@
+@@ -573,6 +1305,35 @@
  }
  
  //#endregion
@@ -816,7 +823,7 @@
  //#region src/host/whisper-policy.ts
  function automaticWhisperSchedule(policy, petEnabled, configuredPeriodSec) {
  	if (!policy) return {
-@@ -804,6 +1558,13 @@
+@@ -804,6 +1565,13 @@
  	"whisperImageEnabled",
  	"chatImageEnabled",
  	"chatImageLimit",
@@ -830,7 +837,7 @@
  	"chatMemoryRounds",
  	"whisperModel",
  	"chatModel",
-@@ -972,6 +1733,13 @@
+@@ -972,6 +1740,13 @@
  		case "notificationsEnabled": return typeof value === "boolean";
  		case "whisperImageEnabled": return typeof value === "boolean";
  		case "chatImageEnabled": return typeof value === "boolean";
@@ -844,7 +851,7 @@
  		case "confineToScreen": return typeof value === "boolean";
  		case "animations": return animationsValid(value);
  		case "animationWeights": return weightsValid(value);
-@@ -1217,6 +1985,20 @@
+@@ -1217,6 +1992,20 @@
  	if (wie !== void 0 && typeof wie !== "boolean") return null;
  	const cie = o.chatImageEnabled;
  	if (cie !== void 0 && typeof cie !== "boolean") return null;
@@ -865,7 +872,7 @@
  	const cts = o.confineToScreen;
  	if (cts !== void 0 && typeof cts !== "boolean") return null;
  	const ph = o.physics;
-@@ -1239,6 +2021,13 @@
+@@ -1239,6 +2028,13 @@
  	if (ne !== void 0) outConfig.notificationsEnabled = ne;
  	if (wie !== void 0) outConfig.whisperImageEnabled = wie;
  	if (cie !== void 0) outConfig.chatImageEnabled = cie;
@@ -879,7 +886,7 @@
  	if (cts !== void 0) outConfig.confineToScreen = cts;
  	if (ph !== void 0) outConfig.physics = ph;
  	if (fo !== void 0) outConfig.font = fo;
-@@ -1250,6 +2039,13 @@
+@@ -1250,6 +2046,13 @@
  	if (ne !== void 0) bodyOwned.add("notificationsEnabled");
  	if (wie !== void 0) bodyOwned.add("whisperImageEnabled");
  	if (cie !== void 0) bodyOwned.add("chatImageEnabled");
@@ -893,7 +900,7 @@
  	if (cts !== void 0) bodyOwned.add("confineToScreen");
  	if (ph !== void 0) bodyOwned.add("physics");
  	if (fo !== void 0) bodyOwned.add("font");
-@@ -4005,6 +4801,10 @@
+@@ -4005,6 +4808,10 @@
  	};
  	let activePetId = "";
  	const lastWhisperAt = new Map();
@@ -904,7 +911,7 @@
  	const memoryPath = join(userRoot, "memory.json");
  	let chatQueue = Promise.resolve();
  	/** 读记忆文件：不存在 → 空；损坏 → 显式报错 + 备份原始文件（绝不静默丢数据）+ 重建空记忆 */
-@@ -4052,12 +4852,38 @@
+@@ -4052,12 +4859,38 @@
  		id: String(found.pet.id ?? ""),
  		now: new Date()
  	});
@@ -943,7 +950,7 @@
  	/** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
  	*  每只宠物独立生成（人设 = 它自己的 whisperPrompt，没写回落到所属条目）。生成成功就写进 S 的 pets.<id>.say——
  	*  碎碎念 / 命令气泡 / 对话回复在前端本来就是**同一条展示链路**（同一个 triggerWhisper、
-@@ -4075,9 +4901,10 @@
+@@ -4075,9 +4908,10 @@
  			reason: "unknown-pet",
  			message: "没有这只桌宠：" + petId
  		};
@@ -956,7 +963,7 @@
  		if (!result.ok) {
  			console.warn("[dsh-pet] 碎碎念生成失败 pet=" + petId + " reason=" + result.reason + (result.message ? " " + result.message : ""));
  			return result;
-@@ -4092,6 +4919,101 @@
+@@ -4092,6 +4926,105 @@
  			...result.image ? { image: result.image } : {}
  		};
  	};
@@ -1036,7 +1043,11 @@
 +				if (cfg0.main?.hsCoachOpponentTalk === false) return coachFail(petId, "not-my-turn", "等你回合再问");
 +				const comment = await generateCoachText(ctx, coachFoeSystemPrompt(), stateText + "\n现在是对手回合，用一句话解说或预测他要做什么。", configuredModel(found.conf, "whisperModel"));
 +				if (!comment.ok) return coachFail(petId, comment.reason, "算不了：" + (comment.message || comment.reason));
-+				return coachSay(petId, cleanCoachAdvice(comment.text) || "看他这波想干嘛");
++				const said = coachSay(petId, cleanCoachAdvice(comment.text) || "看他这波想干嘛");
++				return withDebug ? {
++					...said,
++					state: stateText
++				} : said;
 +			}
 +			const playable = snap.me.hand.filter((c) => c.cost <= snap.me.mana.max - snap.me.mana.used);
 +			const attackers = snap.me.board.filter((x) => x.canAttack && !x.frozen);
@@ -1058,7 +1069,7 @@
  	/** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 把回复写进 S 的 pets.<id>.say。
  	*  供 POST /chat（动作端点）与 /chat 命令共用同一条路径（锁内读写，防两端交错写盘）。
  	*  配图（chatImageEnabled 开启时）：把表情包清单交给模型按语境选一张，命中池内才随回复写回。
-@@ -4957,6 +5879,42 @@
+@@ -4957,6 +5890,42 @@
  				};
  			}
  		}
@@ -1101,7 +1112,7 @@
  		if (rest === "whisper") {
  			if (method !== "POST") return {
  				kind: "json",
-@@ -5859,6 +6817,273 @@
+@@ -5859,6 +6828,273 @@
  			if (timer !== null) clearTimeout(timer);
  		};
  	}, "dsh-pet: whisper poll");
