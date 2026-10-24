@@ -1016,12 +1016,13 @@ function formatState(snap) {
   lines.push(`回合 ${snap.turn}，${snap.myTurn ? "轮到我方" : "当前是对手回合"}。`);
   const myAvail = m.mana.max - m.mana.used;
   const myVisible = m.hand.filter((c) => c.cardId);
-  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}本回合可用 ${myAvail} 费（水晶上限 ${m.mana.max}，已用 ${m.mana.used}）${m.mana.overloadLocked ? " 过载锁定 " + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
+  lines.push(`我方 ${m.hero.class || ""}英雄 ${m.hero.name}：${m.hero.health ?? "?"}血 ${m.hero.armor ? m.hero.armor + "甲 " : ""}本回合还能用 ${myAvail} 费${m.mana.overloadLocked ? " 过载锁定 " + m.mana.overloadLocked : ""} 牌库 ${m.deckCount}。`);
   lines.push(`我方手牌 ${m.hand.length} 张：` + (myVisible.map((c) => `${c.name}(${c.cost}费)${c.text ? "[" + c.text.slice(0, 40) + "]" : ""}`).join("；") || "无"));
   const playable = myVisible.filter((c) => c.cost <= myAvail);
   lines.push(`本回合可用手牌（只能从这里面选）：` + (playable.map((c) => `${c.name}(${c.cost}费)`).join("；") || "一张都打不出"));
   lines.push(`我方场面 ${m.board.length} 个：` + (m.board.map(fmtMinion).join("；") || "空") + (m.weapon ? `；武器 ${m.weapon.name} ${m.weapon.atk}/${m.weapon.durability}` : ""));
-  lines.push(`对手 ${f.hero.class || ""}英雄 ${f.hero.name}：${f.hero.health ?? "?"}血 ${f.hero.armor ? f.hero.armor + "甲 " : ""}手牌 ${f.hand.length} 张 牌库 ${f.deckCount}。`);
+  const foeAvail = f.mana.max - f.mana.used;
+  lines.push(`对手 ${f.hero.class || ""}英雄 ${f.hero.name}：${f.hero.health ?? "?"}血 ${f.hero.armor ? f.hero.armor + "甲 " : ""}本回合还能用 ${foeAvail} 费 手牌 ${f.hand.length} 张 牌库 ${f.deckCount}。`);
   lines.push(`对手场面 ${f.board.length} 个：` + (f.board.map(fmtMinion).join("；") || "空") + (f.secrets ? `；奥秘 ${f.secrets} 个` : ""));
   if (snap.recent.length) lines.push("最近动作：" + snap.recent.join("；"));
   return lines.join("\n");
@@ -1186,7 +1187,7 @@ function coachSystemPrompt() {
     "1. 只输出一句中文建议，不超过 30 个字，直接说操作和目标（带上卡名/随从名）。\n" +
     "2. 只能使用「本回合可用手牌」清单里列出的牌。没列出来的牌一律不许提，不要凭记忆补牌。\n" +
     "3. 场上随从可以攻击；能斩杀就先写斩杀，不能斩杀就给本回合性价比最高的一手。\n" +
-    "4. 费用、血量、手牌数一律照抄局面里给的数字，不要自己加减或推算。\n" +
+    "4. 费用、血量、手牌数一律照抄局面里给的数字，不要自己加减或推算；说费用时只用「本回合还能用 X 费」里的 X，不要拿回合数当费用。\n" +
     "5. 不要解释理由、不要加引号或前缀、不要分段。";
 }
 
