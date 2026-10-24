@@ -3,6 +3,7 @@
 > 基于 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) **v0.3.8** 的个人修改版备份。
 > 上游 MIT License © 2026 PC2005-cloud；本仓库只是加了两块功能的补丁，非官方版本。
 
+- 当前版本：`v0.3.8-hs2`（2026-10-24）—— 变更见 [CHANGELOG.md](CHANGELOG.md)
 - 备份日期：2026-10-24
 - 上游版本：`dsh-pet@0.3.8`
 - 运行环境：DSH（DeepSeek Harness）桌面版，Web GUI 内嵌桌宠
@@ -55,6 +56,7 @@
 ```
 plugin/                          # 打完补丁的完整 dsh-pet 包（可直接覆盖安装）
 patches/hearthstone-mode.patch   # 相对 v0.3.8 的 lib/*.js + config.jsonc 补丁
+CHANGELOG.md                     # 版本与变更记录（hs1 / hs2 …）
 install.ps1 / install.sh         # 把 plugin/ 装回 DSH profile（含 runtime/coach-hotkey）
 ```
 
